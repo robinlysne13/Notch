@@ -1,0 +1,17 @@
+# Swift / SwiftPM build artifacts
+.build/
+*.o
+*.swiftmodule
+
+# Packaged app bundle (rebuilt via run.sh)
+Notch.app/
+
+# macOS
+.DS_Store
+
+# Xcode (if ever opened there)
+*.xcodeproj/xcuserdata/
+DerivedData/
+
+# Claude Code local settings
+.claude/settings.local.json
