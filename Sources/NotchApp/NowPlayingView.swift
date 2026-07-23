@@ -5,33 +5,44 @@ struct NowPlayingView: View {
 
     var body: some View {
         if media.hasTrack {
-            HStack(spacing: 12) {
-                artwork
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(media.title)
-                        .font(.system(size: 13, weight: .semibold))
-                        .lineLimit(1)
-                    Text(media.artist)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.white.opacity(0.7))
-                        .lineLimit(1)
-                    Text(media.activeApp)
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.4))
-                }
-                Spacer(minLength: 0)
-                controls
+            VStack(spacing: 10) {
+                track
+                ProgressBar(media: media)
             }
         } else {
-            HStack(spacing: 8) {
-                Image(systemName: "music.note")
-                    .foregroundStyle(.white.opacity(0.5))
-                Text("Nothing playing")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.5))
-            }
-            .frame(maxWidth: .infinity, minHeight: 48)
+            empty
         }
+    }
+
+    private var track: some View {
+        HStack(spacing: 12) {
+            artwork
+            VStack(alignment: .leading, spacing: 2) {
+                Text(media.title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
+                Text(media.artist)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.white.opacity(0.7))
+                    .lineLimit(1)
+                Text(media.activeApp)
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.4))
+            }
+            Spacer(minLength: 0)
+            controls
+        }
+    }
+
+    private var empty: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "music.note")
+                .foregroundStyle(.white.opacity(0.5))
+            Text("Nothing playing")
+                .font(.system(size: 12))
+                .foregroundStyle(.white.opacity(0.5))
+        }
+        .frame(maxWidth: .infinity, minHeight: 68)
     }
 
     private var artwork: some View {

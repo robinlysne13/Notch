@@ -90,7 +90,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let closed = CGSize(width: notchWidth, height: notchHeight)
-        let open = CGSize(width: 440, height: 132 + notchHeight)
+        let open = CGSize(width: 440, height: 152 + notchHeight)
         let window = CGSize(
             width: max(open.width, notchWidth) + 80,
             height: open.height + 40
