@@ -9,6 +9,15 @@ struct NotchRootView: View {
         .spring(response: 0.35, dampingFraction: 0.78)
     }
 
+    /// Read live from `SMAppService` each time the context menu opens, so the toggle stays
+    /// truthful if the login item is changed in System Settings.
+    private var launchAtLogin: Binding<Bool> {
+        Binding(
+            get: { LaunchAtLogin.isEnabled },
+            set: { LaunchAtLogin.setEnabled($0) }
+        )
+    }
+
     var body: some View {
         let size = state.isOpen ? state.openSize : state.closedSize
         ZStack(alignment: .top) {
@@ -28,6 +37,9 @@ struct NotchRootView: View {
             .frame(width: size.width, height: size.height)
             .onHover { hovering in
                 withAnimation(animation) { state.isOpen = hovering }
+            }
+            .contextMenu {
+                Toggle("Launch at Login", isOn: launchAtLogin)
             }
         }
         .frame(width: state.windowSize.width, height: state.windowSize.height, alignment: .top)

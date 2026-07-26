@@ -62,6 +62,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         self.panel = panel
         media.start()
+        LaunchAtLogin.syncOnLaunch()
     }
 
     // MARK: Geometry
