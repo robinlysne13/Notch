@@ -5,10 +5,6 @@ struct NotchRootView: View {
     @ObservedObject var media: MediaController
     @ObservedObject var shelf: ShelfModel
 
-    private var animation: Animation {
-        .spring(response: 0.35, dampingFraction: 0.78)
-    }
-
     /// Read live from `SMAppService` each time the context menu opens, so the toggle stays
     /// truthful if the login item is changed in System Settings.
     private var launchAtLogin: Binding<Bool> {
@@ -35,9 +31,6 @@ struct NotchRootView: View {
                 }
             }
             .frame(width: size.width, height: size.height)
-            .onHover { hovering in
-                withAnimation(animation) { state.isOpen = hovering }
-            }
             .contextMenu {
                 Toggle("Launch at Login", isOn: launchAtLogin)
             }

@@ -8,6 +8,10 @@ enum NotchTab: Hashable {
 /// Shared geometry + open/closed state, read by both SwiftUI and the AppKit hosting view.
 @MainActor
 final class NotchState: ObservableObject {
+    /// Expand/collapse animation. Owned here because the pointer tracking that drives `isOpen`
+    /// lives in `AppDelegate`, not in the view.
+    static let toggle = Animation.spring(response: 0.35, dampingFraction: 0.78)
+
     @Published var isOpen = false
     @Published var selectedTab: NotchTab = .nowPlaying
 
@@ -24,11 +28,10 @@ final class NotchState: ObservableObject {
         self.windowSize = windowSize
     }
 
-    /// Region (in the hosting view's own coordinate space) that should receive mouse events.
-    /// Everything outside this rect is click-through so the desktop stays usable.
-    /// The chrome is pinned to the top of the window, so `flipped` decides which end that is —
-    /// `NSHostingView` is flipped, an unflipped host would need the far edge instead.
-    func hittableRect(in bounds: CGRect, flipped: Bool) -> CGRect {
+    /// The notch chrome's rect within `bounds`, which may be the hosting view's bounds or the
+    /// panel's screen frame. The chrome is pinned to the top edge and horizontally centered, so
+    /// `flipped` decides which end is "top" — `NSHostingView` is flipped, screen space is not.
+    func chromeRect(in bounds: CGRect, flipped: Bool) -> CGRect {
         let size = isOpen ? openSize : closedSize
         return CGRect(
             x: bounds.midX - size.width / 2,
