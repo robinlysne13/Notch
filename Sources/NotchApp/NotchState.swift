@@ -24,12 +24,17 @@ final class NotchState: ObservableObject {
         self.windowSize = windowSize
     }
 
-    /// Region (in window/content coordinates, origin bottom-left) that should receive mouse events.
+    /// Region (in the hosting view's own coordinate space) that should receive mouse events.
     /// Everything outside this rect is click-through so the desktop stays usable.
-    var hittableRect: CGRect {
+    /// The chrome is pinned to the top of the window, so `flipped` decides which end that is —
+    /// `NSHostingView` is flipped, an unflipped host would need the far edge instead.
+    func hittableRect(in bounds: CGRect, flipped: Bool) -> CGRect {
         let size = isOpen ? openSize : closedSize
-        let x = (windowSize.width - size.width) / 2
-        let y = windowSize.height - size.height
-        return CGRect(x: x, y: y, width: size.width, height: size.height)
+        return CGRect(
+            x: bounds.midX - size.width / 2,
+            y: flipped ? bounds.minY : bounds.maxY - size.height,
+            width: size.width,
+            height: size.height
+        )
     }
 }

@@ -9,10 +9,10 @@ final class PassthroughHostingView<Content: View>: NSHostingView<Content> {
     override func hitTest(_ point: NSPoint) -> NSView? {
         // `point` is in the superview's coordinate space; convert into ours.
         let local = convert(point, from: superview)
-        if let state, state.hittableRect.contains(local) {
-            return super.hitTest(point)
+        guard let state, state.hittableRect(in: bounds, flipped: isFlipped).contains(local) else {
+            return nil
         }
-        return nil
+        return super.hitTest(point)
     }
 }
 
