@@ -1,9 +1,9 @@
+import AppKit
 import SwiftUI
-import UniformTypeIdentifiers
 
 struct ShelfView: View {
     @ObservedObject var shelf: ShelfModel
-    @State private var targeted = false
+    private var targeted: Bool { shelf.isDropTargeted }
 
     var body: some View {
         ZStack {
@@ -37,9 +37,6 @@ struct ShelfView: View {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(Color.white.opacity(targeted ? 0.08 : 0.0))
         )
-        .onDrop(of: [UTType.fileURL], isTargeted: $targeted) { providers in
-            handleDrop(providers)
-        }
     }
 
     private func itemView(_ item: ShelfItem) -> some View {
@@ -53,28 +50,81 @@ struct ShelfView: View {
                 .lineLimit(1)
                 .frame(width: 48)
         }
-        .onDrag {
-            NSItemProvider(contentsOf: item.url) ?? NSItemProvider()
-        }
-        .contextMenu {
-            Button("Reveal in Finder") {
-                NSWorkspace.shared.activateFileViewerSelecting([item.url])
-            }
-            Button("Remove", role: .destructive) {
-                shelf.remove(item)
-            }
-        }
+        .overlay(ShelfItemDragSource(item: item, shelf: shelf))
+    }
+}
+
+/// AppKit drag source for a shelf item. SwiftUI's `.onDrag` never reports how the drag session
+/// ended, and removing an item once it lands somewhere requires exactly that signal —
+/// `draggingSession(_:endedAt:operation:)`. The right-click menu lives here too, because this
+/// view sits above the SwiftUI content and intercepts those clicks either way.
+private struct ShelfItemDragSource: NSViewRepresentable {
+    let item: ShelfItem
+    let shelf: ShelfModel
+
+    func makeNSView(context: Context) -> DragSourceView { DragSourceView() }
+
+    func updateNSView(_ view: DragSourceView, context: Context) {
+        view.item = item
+        view.shelf = shelf
+    }
+}
+
+private final class DragSourceView: NSView, NSDraggingSource {
+    var item: ShelfItem?
+    var shelf: ShelfModel?
+    private var mouseDownEvent: NSEvent?
+
+    override func mouseDown(with event: NSEvent) {
+        mouseDownEvent = event
     }
 
-    private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
-        var handled = false
-        for provider in providers where provider.canLoadObject(ofClass: URL.self) {
-            handled = true
-            _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                guard let url else { return }
-                DispatchQueue.main.async { shelf.add(url) }
-            }
-        }
-        return handled
+    override func mouseDragged(with event: NSEvent) {
+        guard let item, let start = mouseDownEvent else { return }
+        let from = convert(start.locationInWindow, from: nil)
+        let to = convert(event.locationInWindow, from: nil)
+        guard hypot(to.x - from.x, to.y - from.y) > 3 else { return }
+        mouseDownEvent = nil
+
+        let dragItem = NSDraggingItem(pasteboardWriter: item.url as NSURL)
+        let iconFrame = NSRect(x: bounds.midX - 17, y: bounds.midY - 17, width: 34, height: 34)
+        dragItem.setDraggingFrame(iconFrame, contents: item.icon)
+        beginDraggingSession(with: [dragItem], event: start, source: self)
+    }
+
+    func draggingSession(
+        _ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext
+    ) -> NSDragOperation {
+        // Nothing in-app accepts shelf items — a within-app mask of [] keeps a drop back onto
+        // the shelf from re-adding the item just before the removal below runs.
+        context == .outsideApplication ? [.copy, .move, .link, .generic, .delete] : []
+    }
+
+    func draggingSession(
+        _ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation
+    ) {
+        mouseDownEvent = nil
+        // `[]` means the drag was cancelled or poofed; anything else means it landed.
+        guard operation != [], let item else { return }
+        shelf?.remove(item)
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let menu = NSMenu()
+        menu.addItem(withTitle: "Reveal in Finder", action: #selector(reveal), keyEquivalent: "")
+            .target = self
+        menu.addItem(withTitle: "Remove", action: #selector(removeFromShelf), keyEquivalent: "")
+            .target = self
+        return menu
+    }
+
+    @objc private func reveal() {
+        guard let item else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([item.url])
+    }
+
+    @objc private func removeFromShelf() {
+        guard let item else { return }
+        shelf?.remove(item)
     }
 }
