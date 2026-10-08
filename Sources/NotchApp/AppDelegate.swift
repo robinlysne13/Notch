@@ -81,8 +81,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pointerMonitors: [Any] = []
     private var dragPoll: Timer?
     private var dragPasteboardCount = 0
+    /// Decides whether an open was meant, and how long it survives the pointer leaving.
+    private var hover = NotchHover()
+    /// Runs only while the panel is open: rest and the closing grace both have to pass without
+    /// the pointer sending another event.
+    private var hoverTick: Timer?
     private let media = MediaController()
     private let lyrics = LyricsProvider()
+    private let spotifyAuth = SpotifyAuth()
+    private lazy var spotifyLibrary = SpotifyLibrary(auth: spotifyAuth)
     private let shelf = ShelfModel()
     private let accounts = MailAccountStore()
     private lazy var codes = CodeWatcher(store: accounts)
@@ -104,6 +111,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             state: state,
             media: media,
             lyrics: lyrics,
+            library: spotifyLibrary,
             shelf: shelf,
             codes: codes,
             accounts: accounts,
@@ -156,11 +164,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pointerMonitors.removeAll()
         dragPoll?.invalidate()
         dragPoll = nil
+        stopHoverTick()
         codes.stop()
     }
 
     private func showSettings() {
-        settingsWindow.show(accounts: accounts, watcher: codes)
+        settingsWindow.show(accounts: accounts, watcher: codes, spotify: spotifyAuth)
     }
 
     // MARK: Pointer tracking
@@ -172,6 +181,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func startPointerTracking() {
         let mask: NSEvent.EventTypeMask = [
             .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged, .leftMouseDown,
+            // Scrolling the lyrics or the shelf is as deliberate as a click, and is the one way
+            // to use the panel that never moves the pointer.
+            .scrollWheel,
         ]
         // Global fires while other apps are active; local while ours is (context menus, drags).
         if let global = NSEvent.addGlobalMonitorForEvents(matching: mask, handler: { [weak self] event in
@@ -189,6 +201,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func handle(_ event: NSEvent) {
+        // Acting on the panel settles the question of whether it was meant to be open.
+        if event.type == .leftMouseDown || event.type == .scrollWheel, isPointerOnChrome {
+            hover.acted()
+        }
         if event.type == .leftMouseDown {
             beginDragWatch()
         } else {
@@ -196,16 +212,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private var isPointerOnChrome: Bool {
+        guard let panel, let state else { return false }
+        return state.chromeRect(in: panel.frame, flipped: false).contains(NSEvent.mouseLocation)
+    }
+
     private func syncPointer() {
         guard let panel, let state else { return }
         // Never flip interactivity mid-click — that would abort a scrub or a shelf drag.
         guard NSEvent.pressedMouseButtons == 0 else { return }
 
+        let mouse = NSEvent.mouseLocation
         let chrome = state.chromeRect(in: panel.frame, flipped: false)
-        let inside = chrome.contains(NSEvent.mouseLocation)
-        panel.ignoresMouseEvents = !inside
-        guard state.isOpen != inside else { return }
-        withAnimation(NotchState.toggle) { state.isOpen = inside }
+        // Clicks belong to the chrome itself and never to the sticky margin around it, so the
+        // panel goes back to being click-through the moment the pointer is off it — even while
+        // it is still holding open.
+        panel.ignoresMouseEvents = !chrome.contains(mouse)
+
+        switch hover.evaluate(pointer: mouse, chrome: chrome, now: Date()) {
+        case .none:
+            break
+        case .open:
+            setOpen(true)
+        case .close:
+            setOpen(false)
+        }
+    }
+
+    private func setOpen(_ open: Bool) {
+        guard let state, state.isOpen != open else { return }
+        withAnimation(NotchState.toggle) { state.isOpen = open }
+        if open { startHoverTick() } else { stopHoverTick() }
+    }
+
+    /// A pointer resting on the panel sends no further events, and a closing grace has to expire
+    /// on its own, so the hover rule is nudged on a tick for as long as the panel is open.
+    private func startHoverTick() {
+        guard hoverTick == nil else { return }
+        let timer = Timer(timeInterval: 0.08, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.syncPointer() }
+        }
+        // .common, so a tracking loop inside the panel can't stall the countdown.
+        RunLoop.main.add(timer, forMode: .common)
+        hoverTick = timer
+    }
+
+    private func stopHoverTick() {
+        hoverTick?.invalidate()
+        hoverTick = nil
     }
 
     // MARK: Drag-to-open
@@ -246,10 +300,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .insetBy(dx: -Self.dragCatchInset, dy: -Self.dragCatchInset)
         guard target.contains(NSEvent.mouseLocation), !state.isOpen else { return }
         // The shelf is the only tab with a drop target, so aim the drag at something useful.
+        // Aiming a file at the notch is as deliberate as it gets.
+        hover.openDeliberately()
         withAnimation(NotchState.toggle) {
             state.selectedTab = .shelf
             state.isOpen = true
         }
+        startHoverTick()
     }
 
     private var isDraggingFiles: Bool {

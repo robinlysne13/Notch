@@ -4,12 +4,15 @@ import Security
 /// Minimal generic-password store. App-specific passwords never touch `UserDefaults` — only the
 /// account's address and provider live there (see `MailAccountStore`).
 enum Keychain {
-    private static let service = "com.robin.notch.mail"
+    /// Mail passwords and Spotify tokens are different kinds of secret, so they get their own
+    /// Keychain services — revoking one never disturbs the other.
+    static let mailService = "com.robin.notch.mail"
+    static let spotifyService = "com.robin.notch.spotify"
 
-    static func setPassword(_ password: String, account: String) {
+    static func setPassword(_ password: String, account: String, service: String = mailService) {
         // Delete-then-add rather than SecItemUpdate: it is one code path for both "new account"
         // and "password rotated", which is all this needs.
-        delete(account: account)
+        delete(account: account, service: service)
         guard !password.isEmpty, let data = password.data(using: .utf8) else { return }
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -21,7 +24,7 @@ enum Keychain {
         SecItemAdd(query as CFDictionary, nil)
     }
 
-    static func password(account: String) -> String? {
+    static func password(account: String, service: String = mailService) -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -36,7 +39,7 @@ enum Keychain {
         return String(data: data, encoding: .utf8)
     }
 
-    static func delete(account: String) {
+    static func delete(account: String, service: String = mailService) {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,

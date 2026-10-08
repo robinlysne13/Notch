@@ -119,5 +119,228 @@ checkEqual("single line, after", LyricsProvider.index(at: 60, in: single), 0)
 let chorus = (0..<5).map { LyricLine(time: Double($0) * 30, text: "chorus") }
 checkEqual("binary search lands on the right repeat", LyricsProvider.index(at: 95, in: chorus), 3)
 
+// MARK: Lookups that LRCLIB never answered
+//
+// A 503 (LRCLIB sheds load under traffic) must not be remembered as "this track has no lyrics".
+// It used to be, which left a track blank for the rest of the session however often you came
+// back to it.
+
+/// Serves a given number of 503s, then real synced lyrics.
+final class FlakyLRCLIB: URLProtocol {
+    nonisolated(unsafe) static var failuresLeft = 0
+    nonisolated(unsafe) static var requests = 0
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for r: URLRequest) -> URLRequest { r }
+    override func stopLoading() {}
+
+    override func startLoading() {
+        Self.requests += 1
+        let failing = Self.failuresLeft > 0
+        if failing { Self.failuresLeft -= 1 }
+
+        let body: Data
+        if failing {
+            body = Data(#"{"name":"ServerOverloaded","statusCode":503}"#.utf8)
+        } else if request.url?.path == "/api/get" {
+            body = Data(#"{"instrumental":false,"syncedLyrics":"[00:01.00] one\n[00:05.00] two"}"#.utf8)
+        } else {
+            body = Data("[]".utf8)
+        }
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: failing ? 503 : 200,
+            httpVersion: nil,
+            headerFields: nil
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+}
+
+@MainActor
+func stubbedProvider() -> LyricsProvider {
+    let config = URLSessionConfiguration.ephemeral
+    config.protocolClasses = [FlakyLRCLIB.self]
+    return LyricsProvider(session: URLSession(configuration: config))
+}
+
+@MainActor
+func settle(_ provider: LyricsProvider) async {
+    // Long enough to cover the one retry the provider makes after a failed lookup.
+    for _ in 0..<200 {
+        try? await Task.sleep(nanoseconds: 25_000_000)
+        if provider.status != .loading { return }
+    }
+}
+
+await MainActor.run { }
+
+await { @MainActor in
+    // One transient 503 on each endpoint, then the service recovers.
+    FlakyLRCLIB.failuresLeft = 2
+    FlakyLRCLIB.requests = 0
+    let provider = stubbedProvider()
+
+    provider.load(title: "Queued Song", artist: "Some Artist", duration: 200)
+    await settle(provider)
+    checkEqual("a transient 503 is retried, not taken as the answer", provider.status, .synced)
+    checkEqual("the retry brings the lyrics back", provider.lines.count, 2)
+
+    // A failure that outlives the retry must still leave nothing cached.
+    FlakyLRCLIB.failuresLeft = 99
+    let stubborn = stubbedProvider()
+    stubborn.load(title: "Other Song", artist: "Some Artist", duration: 180)
+    await settle(stubborn)
+    checkEqual("a lookup that never lands reads as unavailable", stubborn.status, .unavailable)
+
+    // The service comes back. Looking again must actually ask again.
+    FlakyLRCLIB.failuresLeft = 0
+    let before = FlakyLRCLIB.requests
+    stubborn.load(title: "Other Song", artist: "Some Artist", duration: 180)
+    await settle(stubborn)
+    check("a failed lookup is asked again rather than cached", FlakyLRCLIB.requests > before)
+    checkEqual("and it recovers once LRCLIB answers", stubborn.status, .synced)
+
+    // A real "no lyrics here" answer is settled, and is allowed to stick.
+    checkEqual("lines survive the recovery", stubborn.lines.count, 2)
+}()
+
+// MARK: Preferring timings over an exact match
+//
+// /api/get matches on duration, so it often lands on an untimed sheet while a timed copy of the
+// same song sits in the search results. Settling for the exact match leaves the panel showing
+// words that never follow the playhead.
+
+/// Serves whatever each endpoint is set to for the test at hand.
+final class ShapedLRCLIB: URLProtocol {
+    nonisolated(unsafe) static var get = "{}"
+    nonisolated(unsafe) static var search = "[]"
+    nonisolated(unsafe) static var searchRequests = 0
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for r: URLRequest) -> URLRequest { r }
+    override func stopLoading() {}
+
+    override func startLoading() {
+        let isGet = request.url?.path == "/api/get"
+        if !isGet { Self.searchRequests += 1 }
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data((isGet ? Self.get : Self.search).utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+}
+
+let plainSheet = #"{"instrumental":false,"plainLyrics":"one\ntwo\nthree"}"#
+let syncedSheet = #"{"instrumental":false,"syncedLyrics":"[00:01.00] one\n[00:05.00] two"}"#
+
+await { @MainActor in
+    @MainActor func provider() -> LyricsProvider {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [ShapedLRCLIB.self]
+        return LyricsProvider(session: URLSession(configuration: config))
+    }
+
+    // The exact match is untimed, but a timed copy exists in the search results.
+    ShapedLRCLIB.get = plainSheet
+    ShapedLRCLIB.search = "[\(syncedSheet)]"
+    let upgraded = provider()
+    upgraded.load(title: "A", artist: "Artist", duration: 200)
+    await settle(upgraded)
+    checkEqual("an untimed exact match falls through to the timed one", upgraded.status, .synced)
+    checkEqual("and it is the timed sheet that is shown", upgraded.lines.count, 2)
+
+    // Nothing is timed anywhere, so the exact match is still the best answer available.
+    ShapedLRCLIB.get = plainSheet
+    ShapedLRCLIB.search = "[]"
+    let noTimings = provider()
+    noTimings.load(title: "B", artist: "Artist", duration: 200)
+    await settle(noTimings)
+    checkEqual("with no timings anywhere the plain sheet still shows", noTimings.status, .plain)
+    checkEqual("plain keeps all its lines", noTimings.lines.count, 3)
+
+    // A timed exact match is already the best answer; the search endpoint is not worth asking.
+    ShapedLRCLIB.get = syncedSheet
+    ShapedLRCLIB.search = "[]"
+    ShapedLRCLIB.searchRequests = 0
+    let direct = provider()
+    direct.load(title: "C", artist: "Artist", duration: 200)
+    await settle(direct)
+    checkEqual("a timed exact match is taken as is", direct.status, .synced)
+    checkEqual("and the search endpoint is left alone", ShapedLRCLIB.searchRequests, 0)
+
+    // Instrumental is a fact about the track, not a gap to go looking past.
+    ShapedLRCLIB.get = #"{"instrumental":true}"#
+    ShapedLRCLIB.search = "[\(syncedSheet)]"
+    ShapedLRCLIB.searchRequests = 0
+    let instrumental = provider()
+    instrumental.load(title: "D", artist: "Artist", duration: 200)
+    await settle(instrumental)
+    checkEqual("instrumental settles the lookup", instrumental.status, .instrumental)
+    checkEqual("without chasing a mislabelled sheet", ShapedLRCLIB.searchRequests, 0)
+}()
+
+// MARK: Centring the sheet
+
+// The lyric sheet is slid rather than scrolled, so where it sits is this arithmetic rather than
+// the framework's — worth pinning down, since getting it wrong parks the sung line off-centre.
+
+let layout = LyricsLayout(spacing: 10, estimatedRow: 20)
+// Six lines, each a measured 20 tall, in a panel 100 tall: line 0's centre is 10 from the top of
+// the sheet, and the middle of the panel is 50 down.
+let even = Dictionary(uniqueKeysWithValues: (0..<6).map { ($0, CGFloat(20)) })
+
+checkEqual(
+    "the opening line is centred",
+    layout.offset(centring: 0, of: 6, in: 100, heights: even),
+    40
+)
+// Line 2 sits 60 into the sheet (two 20pt lines and two 10pt gaps), with its own centre 10 below
+// that — so the sheet has to ride 20 above the panel's top edge.
+checkEqual(
+    "a line further down pulls the sheet up",
+    layout.offset(centring: 2, of: 6, in: 100, heights: even),
+    -20
+)
+checkEqual(
+    "each line moves the sheet by its height plus the gap",
+    layout.offset(centring: 2, of: 6, in: 100, heights: even)
+        - layout.offset(centring: 3, of: 6, in: 100, heights: even),
+    30
+)
+
+// A line that wraps to two rows takes its own height into account, and shifts everything after it.
+var wrapped = even
+wrapped[1] = 44
+checkEqual(
+    "a wrapped line is centred on its own height",
+    layout.offset(centring: 1, of: 6, in: 100, heights: wrapped),
+    50 - 30 - 22
+)
+checkEqual(
+    "and pushes the lines below it down",
+    layout.offset(centring: 2, of: 6, in: 100, heights: wrapped),
+    layout.offset(centring: 2, of: 6, in: 100, heights: even) - 24
+)
+
+// Lines are measured a frame after they are first laid out, so the estimate has to stand in
+// without throwing the sheet somewhere absurd.
+checkEqual(
+    "an unmeasured line falls back to the estimate",
+    layout.offset(centring: 2, of: 6, in: 100, heights: [:]),
+    -20
+)
+
+// Nothing here should be able to put the sheet somewhere there is no line.
+checkEqual("no current line centres the opening one", layout.offset(centring: nil, of: 6, in: 100, heights: even), 40)
+checkEqual("an index past the end clamps", layout.offset(centring: 99, of: 6, in: 100, heights: even),
+           layout.offset(centring: 5, of: 6, in: 100, heights: even))
+checkEqual("a negative index clamps", layout.offset(centring: -3, of: 6, in: 100, heights: even), 40)
+checkEqual("an empty sheet sits still", layout.offset(centring: 3, of: 0, in: 100, heights: even), 0)
+checkEqual("so does a panel with no height yet", layout.offset(centring: 3, of: 6, in: 0, heights: even), 0)
 print("\n\(passed) passed, \(failures) failed")
 exit(failures == 0 ? 0 : 1)

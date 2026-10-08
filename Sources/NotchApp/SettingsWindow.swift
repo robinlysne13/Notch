@@ -7,14 +7,24 @@ import SwiftUI
 final class SettingsWindow {
     private var window: NSWindow?
 
-    func show(accounts: MailAccountStore, watcher: CodeWatcher) {
+    func show(accounts: MailAccountStore, watcher: CodeWatcher, spotify: SpotifyAuth) {
         if let window {
             present(window)
             return
         }
-        let view = MailSettingsView(accounts: accounts, watcher: watcher)
+        // Two unrelated setups — mailboxes and a Spotify sign-in — so they get a tab each rather
+        // than one long form.
+        let view = TabView {
+            MailSettingsView(accounts: accounts, watcher: watcher)
+                .tabItem { Label("Mail", systemImage: "envelope") }
+            SpotifySettingsView(auth: spotify)
+                .tabItem { Label("Spotify", systemImage: "music.note") }
+        }
+        .padding(.top, 6)
+        .frame(width: 452, height: 470)
+
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 440),
+            contentRect: NSRect(x: 0, y: 0, width: 452, height: 470),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false

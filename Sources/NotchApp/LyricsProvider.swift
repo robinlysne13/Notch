@@ -39,6 +39,7 @@ final class LyricsProvider: ObservableObject {
     /// LRCLIB asks clients to identify themselves rather than send a browser string.
     private static let userAgent = "Notch/1.0 (https://github.com/robinlysne/Notch)"
     private static let cacheLimit = 64
+    private static let retryDelay: Double = 1.5
 
     init(session: URLSession = .shared) {
         self.session = session
@@ -63,14 +64,32 @@ final class LyricsProvider: ObservableObject {
         lines = []
         inFlight = Task { [weak self] in
             guard let self else { return }
-            let result = await Self.fetch(
+            var result = await Self.fetch(
                 title: title,
                 artist: artist,
                 duration: duration,
                 session: self.session,
             )
+            // LRCLIB sheds load with a 503 often enough that one retry is worth the wait before
+            // telling someone their track has no lyrics.
+            if !result.isSettled {
+                try? await Task.sleep(nanoseconds: UInt64(Self.retryDelay * 1_000_000_000))
+                guard !Task.isCancelled, self.loadedKey == key else { return }
+                result = await Self.fetch(
+                    title: title,
+                    artist: artist,
+                    duration: duration,
+                    session: self.session,
+                )
+            }
             guard !Task.isCancelled, self.loadedKey == key else { return }
-            self.remember(key: key, result: result)
+            if result.isSettled {
+                self.remember(key: key, result: (result.status, result.lines))
+            } else {
+                // Never remember a verdict LRCLIB didn't actually give. Dropping the key as well
+                // means the next look at the panel asks again instead of trusting the failure.
+                self.loadedKey = nil
+            }
             self.status = result.status
             self.lines = result.lines
         }
@@ -98,21 +117,65 @@ final class LyricsProvider: ObservableObject {
 
     // MARK: Fetching
 
+    /// What a lookup came back with. "LRCLIB says this track has no lyrics" and "LRCLIB never
+    /// answered" both leave the panel empty, but only the first is worth remembering — which is
+    /// why they are kept apart here rather than both collapsing into `.unavailable`.
+    private struct Outcome {
+        let status: Status
+        let lines: [LyricLine]
+        /// True when LRCLIB answered. A failed request leaves this false, and an unsettled
+        /// outcome is neither cached nor allowed to stick.
+        let isSettled: Bool
+    }
+
     private static func fetch(
         title: String,
         artist: String,
         duration: Double,
         session: URLSession,
-    ) async -> (status: Status, lines: [LyricLine]) {
+    ) async -> Outcome {
         // An exact match needs the duration to agree within a couple of seconds, which fails on
         // live or remastered cuts; the search endpoint is the looser second attempt.
-        if let track = await get(title: title, artist: artist, duration: duration, session: session) {
-            return interpret(track)
+        //
+        // The exact match wins only when it carries timings. Timings are the whole point of the
+        // panel, and plenty of tracks have an untimed sheet filed at the exact duration while a
+        // timed one sits under a different copy of the same song — so anything less than synced
+        // is held back as a fallback while the search endpoint is asked for something better.
+        var exact: Outcome?
+
+        switch await get(title: title, artist: artist, duration: duration, session: session) {
+        case .ok(let track):
+            let found = interpret(track)
+            // Synced is as good as it gets, and instrumental is a settled fact about the track
+            // rather than a gap in the sheet — looking further would only find a mislabelled one.
+            if found.status == .synced || found.status == .instrumental {
+                return Outcome(status: found.status, lines: found.lines, isSettled: true)
+            }
+            exact = Outcome(status: found.status, lines: found.lines, isSettled: true)
+        case .empty, .failed:
+            break
         }
-        if let track = await search(title: title, artist: artist, session: session) {
-            return interpret(track)
+
+        switch await search(title: title, artist: artist, session: session) {
+        case .ok(let track):
+            let found = interpret(track)
+            if found.status == .synced {
+                return Outcome(status: found.status, lines: found.lines, isSettled: true)
+            }
+            // No timings anywhere; the exact match is the better of two untimed answers.
+            return exact ?? Outcome(status: found.status, lines: found.lines, isSettled: true)
+        case .empty:
+            return exact ?? Outcome(status: .unavailable, lines: [], isSettled: true)
+        case .failed:
+            // The panel still has to say something, but with the looser attempt unanswered this
+            // verdict is a guess — including a plain sheet that a later look might upgrade — so
+            // it is marked unsettled and asked again rather than remembered.
+            return Outcome(
+                status: exact?.status ?? .unavailable,
+                lines: exact?.lines ?? [],
+                isSettled: false
+            )
         }
-        return (.unavailable, [])
     }
 
     private static func get(
@@ -120,7 +183,7 @@ final class LyricsProvider: ObservableObject {
         artist: String,
         duration: Double,
         session: URLSession,
-    ) async -> Track? {
+    ) async -> Reply<Track> {
         var query = [
             URLQueryItem(name: "track_name", value: title),
             URLQueryItem(name: "artist_name", value: artist),
@@ -128,34 +191,50 @@ final class LyricsProvider: ObservableObject {
         if duration > 0 {
             query.append(URLQueryItem(name: "duration", value: String(Int(duration.rounded()))))
         }
-        let tracks: [Track]? = await request(path: "/api/get", query: query, session: session)
-            .map { [$0] }
-        return tracks?.first
+        return await request(path: "/api/get", query: query, session: session)
     }
 
     private static func search(
         title: String,
         artist: String,
         session: URLSession,
-    ) async -> Track? {
+    ) async -> Reply<Track> {
         let query = [
             URLQueryItem(name: "track_name", value: title),
             URLQueryItem(name: "artist_name", value: artist),
         ]
-        let results: [Track]? = await request(path: "/api/search", query: query, session: session)
-        // Prefer a hit that actually carries timings over the first one listed.
-        return results?.first { $0.syncedLyrics?.isEmpty == false } ?? results?.first
+        let results: Reply<[Track]> = await request(path: "/api/search", query: query, session: session)
+        switch results {
+        case .ok(let tracks):
+            // Prefer a hit that actually carries timings over the first one listed.
+            let best = tracks.first { $0.syncedLyrics?.isEmpty == false } ?? tracks.first
+            return best.map { .ok($0) } ?? .empty
+        case .empty:
+            return .empty
+        case .failed:
+            return .failed
+        }
+    }
+
+    /// Whether LRCLIB answered, and what it said. The distinction matters because a `.failed`
+    /// lookup must not be mistaken for "this track has no lyrics".
+    private enum Reply<T> {
+        case ok(T)
+        /// LRCLIB answered and has nothing for this track.
+        case empty
+        /// Offline, rate-limited, or LRCLIB shedding load — no answer at all.
+        case failed
     }
 
     private static func request<T: Decodable>(
         path: String,
         query: [URLQueryItem],
         session: URLSession,
-    ) async -> T? {
+    ) async -> Reply<T> {
         var components = URLComponents(string: "https://lrclib.net")
         components?.path = path
         components?.queryItems = query
-        guard let url = components?.url else { return nil }
+        guard let url = components?.url else { return .failed }
 
         var request = URLRequest(url: url)
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
@@ -163,11 +242,22 @@ final class LyricsProvider: ObservableObject {
 
         do {
             let (data, response) = try await session.data(for: request)
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return nil }
-            return try JSONDecoder().decode(T.self, from: data)
+            guard let http = response as? HTTPURLResponse else { return .failed }
+            switch http.statusCode {
+            case 200:
+                guard let decoded = try? JSONDecoder().decode(T.self, from: data) else { return .failed }
+                return .ok(decoded)
+            case 404:
+                // LRCLIB's "nothing here" — an answer, just not a useful one.
+                return .empty
+            default:
+                // 429 and 503 land here: LRCLIB sheds load under traffic, and treating that as
+                // "no lyrics" is what used to leave a track blank for the rest of the session.
+                return .failed
+            }
         } catch {
-            // Offline, rate-limited or no match — all of them just mean "no lyrics to show".
-            return nil
+            // Offline, timed out, or cancelled.
+            return .failed
         }
     }
 
