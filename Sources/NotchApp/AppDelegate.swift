@@ -1,10 +1,23 @@
 import AppKit
+import CoreGraphics
 import SwiftUI
 
 /// Hosting view that only accepts mouse events within the notch's current hittable region,
-/// leaving the rest of the (transparent) window click-through.
+/// leaving the rest of the (transparent) window click-through. Also owns file drops: the shelf
+/// view doesn't exist until the notch opens mid-drag, and registering dragged types that late
+/// isn't seen by the in-flight drag session — so the types must be registered here, at launch.
 final class PassthroughHostingView<Content: View>: NSHostingView<Content> {
     var state: NotchState?
+    var shelf: ShelfModel?
+
+    private static var fileURLOptions: [NSPasteboard.ReadingOptionKey: Any] {
+        [.urlReadingFileURLsOnly: true]
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        registerForDraggedTypes([.fileURL])
+    }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         // `point` is in the superview's coordinate space; convert into ours.
@@ -13,6 +26,51 @@ final class PassthroughHostingView<Content: View>: NSHostingView<Content> {
             return nil
         }
         return super.hitTest(point)
+    }
+
+    // MARK: NSDraggingDestination
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        dropOperation(for: sender)
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        dropOperation(for: sender)
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        shelf?.isDropTargeted = false
+    }
+
+    override func draggingEnded(_ sender: NSDraggingInfo) {
+        shelf?.isDropTargeted = false
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        shelf?.isDropTargeted = false
+        guard let shelf,
+              let urls = sender.draggingPasteboard.readObjects(
+                  forClasses: [NSURL.self], options: Self.fileURLOptions
+              ) as? [URL],
+              !urls.isEmpty
+        else { return false }
+        urls.forEach(shelf.add)
+        return true
+    }
+
+    /// Accept file drags over the notch chrome; return `[]` elsewhere so the drag falls through
+    /// to whatever is below the transparent window.
+    private func dropOperation(for sender: NSDraggingInfo) -> NSDragOperation {
+        let local = convert(sender.draggingLocation, from: nil)
+        guard let state,
+              state.chromeRect(in: bounds, flipped: isFlipped).contains(local),
+              sender.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: Self.fileURLOptions)
+        else {
+            shelf?.isDropTargeted = false
+            return []
+        }
+        shelf?.isDropTargeted = true
+        return .copy
     }
 }
 
@@ -25,6 +83,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var dragPasteboardCount = 0
     private let media = MediaController()
     private let shelf = ShelfModel()
+    private let accounts = MailAccountStore()
+    private lazy var codes = CodeWatcher(store: accounts)
+    private let settingsWindow = SettingsWindow()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let screen = notchedScreen()
@@ -37,9 +98,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         self.state = state
 
-        let rootView = NotchRootView(state: state, media: media, shelf: shelf)
+        let rootView = NotchRootView(
+            state: state,
+            media: media,
+            shelf: shelf,
+            codes: codes,
+            accounts: accounts,
+            openSettings: { [weak self] in self?.showSettings() }
+        )
         let hostingView = PassthroughHostingView(rootView: rootView)
         hostingView.state = state
+        hostingView.shelf = shelf
 
         let panel = NSPanel(
             contentRect: NSRect(origin: .zero, size: geometry.window),
@@ -54,21 +123,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.isFloatingPanel = true
         panel.becomesKeyOnlyIfNeeded = true
         panel.hidesOnDeactivate = false
-        panel.level = NSWindow.Level(rawValue: Int(CGShieldingWindowLevel()))
+        // Must sit above the menu bar (.mainMenu) but below the drag layer
+        // (kCGDraggingWindowLevel, 500) — any higher and file drags render behind the
+        // panel and their drops fall through to the desktop.
+        panel.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1)
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         // The window is far larger than the visible chrome and sits above the menu bar, so it
         // must stay transparent to clicks until the pointer is actually over the notch.
         panel.ignoresMouseEvents = true
 
-        // Pin to the top-center of the target screen.
-        let originX = screen.frame.midX - geometry.window.width / 2
-        let originY = screen.frame.maxY - geometry.window.height
-        panel.setFrameOrigin(NSPoint(x: originX, y: originY))
+        layoutPanel(panel, on: screen, geometry: geometry)
         panel.orderFrontRegardless()
 
         self.panel = panel
+        observeScreenChanges()
         startPointerTracking()
         media.start()
+        // A code that lands while the notch is closed should be one hover away, not one hover plus
+        // a tab switch — so aim the panel at it as soon as it arrives.
+        codes.onNewCode = { [weak self] _ in
+            self?.state?.selectedTab = .codes
+        }
+        codes.start()
         LaunchAtLogin.syncOnLaunch()
     }
 
@@ -77,6 +153,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pointerMonitors.removeAll()
         dragPoll?.invalidate()
         dragPoll = nil
+        codes.stop()
+    }
+
+    private func showSettings() {
+        settingsWindow.show(accounts: accounts, watcher: codes)
     }
 
     // MARK: Pointer tracking
@@ -185,25 +266,77 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let window: CGSize
     }
 
+    private func observeScreenChanges() {
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.relayoutForCurrentScreens() }
+        }
+    }
+
+    private func relayoutForCurrentScreens() {
+        guard let panel, let state else { return }
+        let screen = notchedScreen()
+        let geometry = computeGeometry(for: screen)
+        state.updateSizes(closed: geometry.closed, open: geometry.open, window: geometry.window)
+        layoutPanel(panel, on: screen, geometry: geometry)
+    }
+
+    /// The built-in display that has the camera notch, when present.
     private func notchedScreen() -> NSScreen {
-        NSScreen.screens.first(where: { $0.safeAreaInsets.top > 0 })
+        if let builtIn = NSScreen.screens.first(where: { screen in
+            screen.safeAreaInsets.top > 0 && isBuiltIn(screen)
+        }) {
+            return builtIn
+        }
+        return NSScreen.screens.first(where: { $0.safeAreaInsets.top > 0 })
             ?? NSScreen.main
             ?? NSScreen.screens[0]
     }
 
-    private func computeGeometry(for screen: NSScreen) -> Geometry {
-        let hasNotch = screen.safeAreaInsets.top > 0
-        let notchHeight: CGFloat = hasNotch ? screen.safeAreaInsets.top : 32
+    private func isBuiltIn(_ screen: NSScreen) -> Bool {
+        guard let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
+        else { return false }
+        return CGDisplayIsBuiltin(id) != 0
+    }
 
-        var notchWidth: CGFloat = 200
-        if hasNotch,
-           let left = screen.auxiliaryTopLeftArea?.width,
-           let right = screen.auxiliaryTopRightArea?.width {
-            notchWidth = max(120, screen.frame.width - left - right)
-        }
+    /// Hardware notch cutout in global screen coordinates (from the system's auxiliary areas).
+    private func hardwareNotchRect(on screen: NSScreen) -> CGRect? {
+        guard screen.safeAreaInsets.top > 0,
+              let left = screen.auxiliaryTopLeftArea,
+              let right = screen.auxiliaryTopRightArea
+        else { return nil }
+
+        let width = right.minX - left.maxX
+        guard width > 0 else { return nil }
+
+        let height = screen.safeAreaInsets.top
+        return CGRect(x: left.maxX, y: screen.frame.maxY - height, width: width, height: height)
+    }
+
+    private func layoutPanel(_ panel: NSPanel, on screen: NSScreen, geometry: Geometry) {
+        let notch = hardwareNotchRect(on: screen)
+        let anchorX = notch?.midX ?? screen.frame.midX
+        let origin = NSPoint(
+            x: anchorX - geometry.window.width / 2,
+            y: screen.frame.maxY - geometry.window.height
+        )
+        panel.setFrame(
+            NSRect(origin: origin, size: geometry.window),
+            display: true
+        )
+        panel.contentView?.autoresizingMask = [.width, .height]
+    }
+
+    private func computeGeometry(for screen: NSScreen) -> Geometry {
+        let notch = hardwareNotchRect(on: screen)
+        let notchHeight = notch?.height ?? 32
+        let notchWidth = max(120, notch?.width ?? 200)
 
         let closed = CGSize(width: notchWidth, height: notchHeight)
-        let open = CGSize(width: 440, height: 152 + notchHeight)
+        let open = CGSize(width: 440, height: 168 + notchHeight)
         let window = CGSize(
             width: max(open.width, notchWidth) + 80,
             height: open.height + 40

@@ -11,6 +11,9 @@ struct ShelfItem: Identifiable, Equatable {
 /// Temporary holding area for dragged files. Items live in memory for the session.
 final class ShelfModel: ObservableObject {
     @Published private(set) var items: [ShelfItem] = []
+    /// Driven by the window-level drop handling in `PassthroughHostingView`, not SwiftUI's
+    /// `.onDrop`, which would register its drop target too late for an in-flight drag.
+    @Published var isDropTargeted = false
 
     func add(_ url: URL) {
         guard !items.contains(where: { $0.url == url }) else { return }

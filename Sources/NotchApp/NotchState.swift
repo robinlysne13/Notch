@@ -2,6 +2,7 @@ import SwiftUI
 
 enum NotchTab: Hashable {
     case nowPlaying
+    case codes
     case shelf
 }
 
@@ -16,16 +17,22 @@ final class NotchState: ObservableObject {
     @Published var selectedTab: NotchTab = .nowPlaying
 
     /// Size of the notch chrome when collapsed (matches the hardware notch when present).
-    let closedSize: CGSize
+    private(set) var closedSize: CGSize
     /// Size of the expanded panel.
-    let openSize: CGSize
+    private(set) var openSize: CGSize
     /// Size of the host window (must contain the open panel with margin).
-    let windowSize: CGSize
+    private(set) var windowSize: CGSize
 
     init(closedSize: CGSize, openSize: CGSize, windowSize: CGSize) {
         self.closedSize = closedSize
         self.openSize = openSize
         self.windowSize = windowSize
+    }
+
+    func updateSizes(closed: CGSize, open: CGSize, window: CGSize) {
+        closedSize = closed
+        openSize = open
+        windowSize = window
     }
 
     /// The notch chrome's rect within `bounds`, which may be the hosting view's bounds or the
