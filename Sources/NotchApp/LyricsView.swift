@@ -96,6 +96,9 @@ private struct LyricsList: View, Equatable {
     @State private var wheelMonitor: Any?
     /// The panel in window coordinates, so a scroll elsewhere in the notch is left alone.
     @State private var panel: CGRect = .zero
+    /// The last line jumped to by clicking it. Reaching that line is the answer to a click
+    /// rather than the song arriving there, so it is not eased into.
+    @State private var jumpedTo: Int?
 
     private static let spacing: CGFloat = 9
     /// `estimatedRow` is one unwrapped line of 16pt text, standing in until a line is measured.
@@ -250,13 +253,19 @@ private struct LyricsList: View, Equatable {
         .onTapGesture {
             guard canSeek else { return }
             // The seek moves the playhead onto this line, which the follow then glides to.
+            jumpedTo = index
             follow()
             seek(line.time)
         }
         // Keyed on the whole index rather than on this row's own state, so the line taking over
         // and the line handing off animate together — the dimming of the line just sung used to
         // snap, because only `isCurrent` was being watched.
-        .animation(Self.handover, value: current)
+        //
+        // Except on the line just clicked, which takes the colour at once. A handover eased over
+        // a third of a second is right when the song reaches a line on its own, but as the reply
+        // to a click it reads as hesitation — you want to see that the click landed and that the
+        // song is now here.
+        .animation(current == jumpedTo ? nil : Self.handover, value: current)
     }
 
     /// The line in both weights, stacked and crossfaded.
