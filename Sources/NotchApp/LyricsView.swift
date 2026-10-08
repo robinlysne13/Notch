@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Time-synced lyrics that follow the playhead: the current line is bright, the rest recede, and
@@ -86,8 +87,15 @@ private struct LyricsList: View, Equatable {
     /// Measured line heights. Lines wrap, so the only way to centre one is to know them.
     @State private var heights: [Int: CGFloat] = [:]
     @State private var viewport: CGFloat = 0
-    /// How far the sheet is slid. Animated from `recentre`, so each move chooses its own curve.
+    /// How far the sheet is slid to follow the song. Each move chooses its own curve.
     @State private var offsetY: CGFloat = 0
+    /// Where the reader has dragged the sheet to, overriding the follow until they stop. Nil
+    /// means the sheet is following the song.
+    @State private var browsed: CGFloat?
+    @State private var resumeFollowing: DispatchWorkItem?
+    @State private var wheelMonitor: Any?
+    /// The panel in window coordinates, so a scroll elsewhere in the notch is left alone.
+    @State private var panel: CGRect = .zero
 
     private static let spacing: CGFloat = 9
     /// `estimatedRow` is one unwrapped line of 16pt text, standing in until a line is measured.
@@ -100,6 +108,9 @@ private struct LyricsList: View, Equatable {
     /// it carries its velocity into the next line instead of stopping dead between the two, and
     /// comes to rest without overshooting.
     private static let glide: Animation = .interpolatingSpring(duration: 0.75, bounce: 0)
+    /// How long the sheet stays where it was left before it returns to the song. Long enough to
+    /// read the verse you scrolled back to, short enough that it comes back on its own.
+    private static let resumeDelay: Double = 5
     /// How far the highlight can move and still be glided to. A tap or a scrub can move it
     /// dozens of lines at once, and racing the sheet through everything in between is a blur —
     /// past this it cuts straight there, which reads as arriving rather than as a scramble.
@@ -117,7 +128,7 @@ private struct LyricsList: View, Equatable {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .offset(y: offsetY)
+            .offset(y: browsed ?? offsetY)
             // A re-measure or a resize is not a move: it settles where the sheet already was,
             // so it is placed rather than glided.
             .onPreferenceChange(RowHeights.self) { measured in
@@ -128,10 +139,15 @@ private struct LyricsList: View, Equatable {
                 viewport = height
                 offsetY = centring(on: current, heights: heights, viewport: height)
             }
+            .onChange(of: geo.frame(in: .global), initial: true) { _, frame in
+                panel = frame
+            }
             .onChange(of: current) { old, new in
                 let step = old.map { abs((new ?? 0) - $0) } ?? Int.max
                 let target = centring(on: new, heights: heights, viewport: viewport)
-                guard step <= Self.glideLimit else {
+                // Kept up to date even while the reader is browsing, so that when the sheet does
+                // return to the song it returns to the line being sung by then.
+                guard browsed == nil, step <= Self.glideLimit else {
                     offsetY = target
                     return
                 }
@@ -144,7 +160,68 @@ private struct LyricsList: View, Equatable {
             }
         }
         .clipped()
+        // The sheet is taller than the panel and slides within it, and `clipped` only stops the
+        // overflow being drawn — it stays hit-testable. Without a content shape of the panel's
+        // own, the lyrics above and below reach over the controls: clicking the note button hit
+        // whichever line was covering it and seeked to its timestamp, restarting the song.
+        .contentShape(Rectangle())
         .mask(fade)
+        .onAppear { watchForScrolling() }
+        .onDisappear {
+            if let wheelMonitor { NSEvent.removeMonitor(wheelMonitor) }
+            wheelMonitor = nil
+            resumeFollowing?.cancel()
+        }
+    }
+
+    // MARK: Browsing by hand
+
+    /// SwiftUI has no scroll-wheel event of its own, and an `NSView` overlay that caught them
+    /// would have to be hit-testable, which would take the clicks on the lines with it. A local
+    /// monitor sees the wheel without standing in front of anything.
+    private func watchForScrolling() {
+        guard wheelMonitor == nil else { return }
+        wheelMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
+            guard covers(event) else { return event }
+            slide(by: event.scrollingDeltaY)
+            return nil
+        }
+    }
+
+    private func covers(_ event: NSEvent) -> Bool {
+        // Permissive if the window cannot be resolved: the monitor only runs while the panel is
+        // on screen, and swallowing a scroll is friendlier than ignoring one.
+        guard let content = event.window?.contentView else { return true }
+        // AppKit measures from the bottom left, SwiftUI's global space from the top left.
+        let point = CGPoint(
+            x: event.locationInWindow.x,
+            y: content.bounds.height - event.locationInWindow.y
+        )
+        return panel.contains(point)
+    }
+
+    /// Move the sheet by hand, and hold it there briefly before it goes back to the song.
+    private func slide(by delta: CGFloat) {
+        resumeFollowing?.cancel()
+        let from = browsed ?? offsetY
+        browsed = Self.layout.clamped(
+            from + delta,
+            count: lines.count,
+            in: viewport,
+            heights: heights
+        )
+        let work = DispatchWorkItem {
+            withAnimation(Self.glide) { browsed = nil }
+        }
+        resumeFollowing = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.resumeDelay, execute: work)
+    }
+
+    /// Back to following the song, now — a tap has just moved the playhead to a line.
+    private func follow() {
+        resumeFollowing?.cancel()
+        resumeFollowing = nil
+        browsed = nil
     }
 
     private func centring(on index: Int?, heights: [Int: CGFloat], viewport: CGFloat) -> CGFloat {
@@ -172,6 +249,8 @@ private struct LyricsList: View, Equatable {
         .contentShape(Rectangle())
         .onTapGesture {
             guard canSeek else { return }
+            // The seek moves the playhead onto this line, which the follow then glides to.
+            follow()
             seek(line.time)
         }
         // Keyed on the whole index rather than on this row's own state, so the line taking over

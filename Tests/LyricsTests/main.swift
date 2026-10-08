@@ -342,5 +342,36 @@ checkEqual("an index past the end clamps", layout.offset(centring: 99, of: 6, in
 checkEqual("a negative index clamps", layout.offset(centring: -3, of: 6, in: 100, heights: even), 40)
 checkEqual("an empty sheet sits still", layout.offset(centring: 3, of: 0, in: 100, heights: even), 0)
 checkEqual("so does a panel with no height yet", layout.offset(centring: 3, of: 6, in: 0, heights: even), 0)
+// MARK: Browsing the sheet by hand
+
+// Scrolling by hand slides the same offset the follow animates, so it is held to the range that
+// keeps at least one line on the panel — otherwise a flick would leave it looking at nothing.
+
+let reach = layout.browsing(6, in: 100, heights: even)
+checkEqual("the sheet cannot be pulled below its opening line", reach.upperBound, 40)
+checkEqual(
+    "nor above its closing line",
+    reach.lowerBound,
+    layout.offset(centring: 5, of: 6, in: 100, heights: even)
+)
+checkEqual(
+    "a flick downwards stops at the first line",
+    layout.clamped(5000, count: 6, in: 100, heights: even),
+    40
+)
+checkEqual(
+    "a flick upwards stops at the last line",
+    layout.clamped(-5000, count: 6, in: 100, heights: even),
+    layout.offset(centring: 5, of: 6, in: 100, heights: even)
+)
+checkEqual(
+    "anywhere in between is left alone",
+    layout.clamped(-20, count: 6, in: 100, heights: even),
+    -20
+)
+// A sheet shorter than the panel has nowhere to go.
+checkEqual("a single line pins the sheet", layout.clamped(-400, count: 1, in: 100, heights: even), 40)
+checkEqual("an empty sheet cannot be browsed", layout.clamped(-400, count: 0, in: 100, heights: even), 0)
+
 print("\n\(passed) passed, \(failures) failed")
 exit(failures == 0 ? 0 : 1)

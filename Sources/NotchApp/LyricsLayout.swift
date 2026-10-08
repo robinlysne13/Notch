@@ -29,3 +29,26 @@ struct LyricsLayout {
         heights[row] ?? estimatedRow
     }
 }
+
+extension LyricsLayout {
+    /// How far the sheet may be slid by hand: from its opening line centred to its closing line
+    /// centred, so browsing cannot push every lyric off the panel.
+    func browsing(_ count: Int, in viewport: CGFloat, heights: [Int: CGFloat]) -> ClosedRange<CGFloat> {
+        guard count > 0, viewport > 0 else { return 0...0 }
+        let first = offset(centring: 0, of: count, in: viewport, heights: heights)
+        let last = offset(centring: count - 1, of: count, in: viewport, heights: heights)
+        // Centring a later line means sliding the sheet further up, so `last` is the lower bound.
+        return min(first, last)...max(first, last)
+    }
+
+    /// `offset` held inside the browsing range.
+    func clamped(
+        _ offset: CGFloat,
+        count: Int,
+        in viewport: CGFloat,
+        heights: [Int: CGFloat]
+    ) -> CGFloat {
+        let range = browsing(count, in: viewport, heights: heights)
+        return min(max(offset, range.lowerBound), range.upperBound)
+    }
+}
