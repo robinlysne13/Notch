@@ -3,6 +3,7 @@ import SwiftUI
 struct NotchRootView: View {
     @ObservedObject var state: NotchState
     @ObservedObject var media: MediaController
+    @ObservedObject var lyrics: LyricsProvider
     @ObservedObject var shelf: ShelfModel
     @ObservedObject var codes: CodeWatcher
     @ObservedObject var accounts: MailAccountStore
@@ -71,7 +72,7 @@ struct NotchRootView: View {
             Group {
                 switch state.selectedTab {
                 case .nowPlaying:
-                    NowPlayingView(media: media)
+                    NowPlayingView(media: media, lyrics: lyrics, showLyrics: $state.showLyrics)
                 case .codes:
                     CodesView(watcher: codes, accounts: accounts, openSettings: openSettings)
                 case .shelf:

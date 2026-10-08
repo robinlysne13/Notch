@@ -82,6 +82,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var dragPoll: Timer?
     private var dragPasteboardCount = 0
     private let media = MediaController()
+    private let lyrics = LyricsProvider()
     private let shelf = ShelfModel()
     private let accounts = MailAccountStore()
     private lazy var codes = CodeWatcher(store: accounts)
@@ -93,7 +94,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let state = NotchState(
             closedSize: geometry.closed,
-            openSize: geometry.open,
+            compactOpenSize: geometry.compactOpen,
+            lyricsHeight: geometry.lyricsHeight,
             windowSize: geometry.window
         )
         self.state = state
@@ -101,6 +103,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let rootView = NotchRootView(
             state: state,
             media: media,
+            lyrics: lyrics,
             shelf: shelf,
             codes: codes,
             accounts: accounts,
@@ -262,7 +265,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private struct Geometry {
         let closed: CGSize
-        let open: CGSize
+        let compactOpen: CGSize
+        let lyricsHeight: CGFloat
         let window: CGSize
     }
 
@@ -280,7 +284,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let panel, let state else { return }
         let screen = notchedScreen()
         let geometry = computeGeometry(for: screen)
-        state.updateSizes(closed: geometry.closed, open: geometry.open, window: geometry.window)
+        state.updateSizes(
+            closed: geometry.closed,
+            compactOpen: geometry.compactOpen,
+            lyricsHeight: geometry.lyricsHeight,
+            window: geometry.window
+        )
         layoutPanel(panel, on: screen, geometry: geometry)
     }
 
@@ -336,11 +345,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let notchWidth = max(120, notch?.width ?? 200)
 
         let closed = CGSize(width: notchWidth, height: notchHeight)
-        let open = CGSize(width: 440, height: 168 + notchHeight)
+        let compactOpen = CGSize(width: 440, height: 168 + notchHeight)
+        let lyricsHeight: CGFloat = 164
+        // The window never resizes — it is sized for the panel at its tallest (lyrics out) so
+        // that growing the panel is only a layout change inside a window that already fits it.
         let window = CGSize(
-            width: max(open.width, notchWidth) + 80,
-            height: open.height + 40
+            width: max(compactOpen.width, notchWidth) + 80,
+            height: compactOpen.height + lyricsHeight + 40
         )
-        return Geometry(closed: closed, open: open, window: window)
+        return Geometry(
+            closed: closed,
+            compactOpen: compactOpen,
+            lyricsHeight: lyricsHeight,
+            window: window
+        )
     }
 }

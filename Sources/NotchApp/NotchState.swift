@@ -15,23 +15,36 @@ final class NotchState: ObservableObject {
 
     @Published var isOpen = false
     @Published var selectedTab: NotchTab = .nowPlaying
+    /// Whether the Now Playing tab has its lyrics panel out. Published because the open panel
+    /// grows to make room for it, and `chromeRect` is what decides where clicks land.
+    @Published var showLyrics = false
 
     /// Size of the notch chrome when collapsed (matches the hardware notch when present).
     private(set) var closedSize: CGSize
-    /// Size of the expanded panel.
-    private(set) var openSize: CGSize
-    /// Size of the host window (must contain the open panel with margin).
+    /// Size of the expanded panel with the lyrics panel stowed.
+    private(set) var compactOpenSize: CGSize
+    /// How much taller the panel gets with lyrics showing.
+    private(set) var lyricsHeight: CGFloat
+    /// Size of the host window (must contain the tallest open panel with margin).
     private(set) var windowSize: CGSize
 
-    init(closedSize: CGSize, openSize: CGSize, windowSize: CGSize) {
+    /// Size of the expanded panel as it currently stands.
+    var openSize: CGSize {
+        guard showLyrics else { return compactOpenSize }
+        return CGSize(width: compactOpenSize.width, height: compactOpenSize.height + lyricsHeight)
+    }
+
+    init(closedSize: CGSize, compactOpenSize: CGSize, lyricsHeight: CGFloat, windowSize: CGSize) {
         self.closedSize = closedSize
-        self.openSize = openSize
+        self.compactOpenSize = compactOpenSize
+        self.lyricsHeight = lyricsHeight
         self.windowSize = windowSize
     }
 
-    func updateSizes(closed: CGSize, open: CGSize, window: CGSize) {
+    func updateSizes(closed: CGSize, compactOpen: CGSize, lyricsHeight: CGFloat, window: CGSize) {
         closedSize = closed
-        openSize = open
+        compactOpenSize = compactOpen
+        self.lyricsHeight = lyricsHeight
         windowSize = window
     }
 

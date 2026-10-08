@@ -1,16 +1,27 @@
 #!/bin/bash
-# Exercises the verification-code extraction against realistic message samples.
+# Exercises the pure logic that is worth pinning down: verification-code extraction against
+# realistic message samples, and the LRC lyric parsing behind the lyrics panel.
 #
 # Not a SwiftPM test target: the package is a single executable target, and testing one would mean
-# splitting the app into a library plus a shim. These heuristics are the part worth pinning down,
-# and compiling the handful of files they touch is enough to do that.
+# splitting the app into a library plus a shim. Compiling the handful of files each suite touches
+# is enough to do that.
 set -e
 cd "$(dirname "$0")/.."
 
 SRC="Sources/NotchApp"
-OUT="$(mktemp -d)/codefinder-tests"
+BUILD="$(mktemp -d)"
+status=0
 
-swiftc -o "$OUT" \
+run_suite() {
+    local name="$1"
+    shift
+    echo "== $name"
+    swiftc -o "$BUILD/$name" "$@"
+    "$BUILD/$name" || status=1
+    echo
+}
+
+run_suite codefinder \
     Tests/CodeFinderTests/main.swift \
     "$SRC/VerificationCodeFinder.swift" \
     "$SRC/MIME.swift" \
@@ -18,4 +29,8 @@ swiftc -o "$OUT" \
     "$SRC/MailAccount.swift" \
     "$SRC/Keychain.swift"
 
-"$OUT"
+run_suite lyrics \
+    Tests/LyricsTests/main.swift \
+    "$SRC/LyricsProvider.swift"
+
+exit $status

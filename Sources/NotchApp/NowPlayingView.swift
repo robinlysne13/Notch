@@ -2,12 +2,17 @@ import SwiftUI
 
 struct NowPlayingView: View {
     @ObservedObject var media: MediaController
+    @ObservedObject var lyrics: LyricsProvider
+    @Binding var showLyrics: Bool
 
     var body: some View {
         if media.hasTrack {
             VStack(spacing: 10) {
                 track
                 ProgressBar(media: media)
+                if showLyrics {
+                    LyricsView(media: media, lyrics: lyrics)
+                }
             }
         } else {
             empty
@@ -32,6 +37,40 @@ struct NowPlayingView: View {
             Spacer(minLength: 0)
             controls
         }
+    }
+
+    /// A pair of separate notes. SF Symbols has no two-note glyph — `music.quarternote.3` is a
+    /// trio — so the pair is composed from the single-note symbol, the second nudged up so the
+    /// two don't read as one smudge at 9pt.
+    private var noteIcon: some View {
+        HStack(spacing: 1) {
+            Image(systemName: "music.note")
+            Image(systemName: "music.note")
+                .offset(y: -1.5)
+        }
+        .font(.system(size: 9, weight: .medium))
+    }
+
+    /// How far the lyrics toggle rides above the play button. Just clears it, so the two read as
+    /// one cluster rather than a stray button near the title.
+    private static let lyricsToggleRise: CGFloat = -20
+
+    /// Stowing the lyrics panel shrinks the notch back, so it animates with the same spring the
+    /// panel uses to open and close.
+    private var lyricsToggle: some View {
+        Button {
+            withAnimation(NotchState.toggle) { showLyrics.toggle() }
+        } label: {
+            noteIcon
+                .foregroundStyle(.white.opacity(showLyrics ? 1 : 0.45))
+                .frame(width: 22, height: 20)
+                .background(
+                    Circle().fill(Color.white.opacity(showLyrics ? 0.18 : 0))
+                )
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .help(showLyrics ? "Hide lyrics" : "Show lyrics")
     }
 
     private var empty: some View {
@@ -67,6 +106,11 @@ struct NowPlayingView: View {
         HStack(spacing: 14) {
             controlButton("backward.fill") { media.previous() }
             controlButton(media.isPlaying ? "pause.fill" : "play.fill", size: 18) { media.playPause() }
+                // Floated over the play button rather than stacked above it: a VStack would push
+                // play/pause down and leave it out of line with the two skip buttons.
+                .overlay(alignment: .top) {
+                    lyricsToggle.offset(y: Self.lyricsToggleRise)
+                }
             controlButton("forward.fill") { media.next() }
         }
     }
