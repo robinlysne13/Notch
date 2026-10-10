@@ -20,6 +20,8 @@
     <string>14.0</string>
     <key>LSUIElement</key>
     <true/>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Notch looks for Sonos speakers on your network to show what they are playing.</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>Notch reads and controls playback in Music and Spotify to show Now Playing info.</string>
 </dict>

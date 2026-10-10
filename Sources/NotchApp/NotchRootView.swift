@@ -3,6 +3,7 @@ import SwiftUI
 struct NotchRootView: View {
     @ObservedObject var state: NotchState
     @ObservedObject var media: MediaController
+    @ObservedObject var sonos: SonosController
     @ObservedObject var lyrics: LyricsProvider
     @ObservedObject var shelf: ShelfModel
     @ObservedObject var codes: CodeWatcher
@@ -36,7 +37,7 @@ struct NotchRootView: View {
             }
             .frame(width: size.width, height: size.height)
             .contextMenu {
-                Button("Mail Accounts…", action: openSettings)
+                Button("Settings…", action: openSettings)
                 Toggle("Copy Codes Automatically", isOn: $codes.autoCopy)
                 Divider()
                 Toggle("Launch at Login", isOn: launchAtLogin)
@@ -72,7 +73,7 @@ struct NotchRootView: View {
             Group {
                 switch state.selectedTab {
                 case .nowPlaying:
-                    NowPlayingView(media: media, lyrics: lyrics, showLyrics: $state.showLyrics)
+                    NowPlayingView(media: media, lyrics: lyrics, sonos: sonos, showLyrics: $state.showLyrics)
                 case .codes:
                     CodesView(watcher: codes, accounts: accounts, openSettings: openSettings)
                 case .shelf:

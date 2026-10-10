@@ -17,8 +17,9 @@ mkdir -p "$APP/Contents/MacOS"
 cp "$BIN" "$APP/Contents/MacOS/NotchApp"
 cp Info.plist "$APP/Contents/Info.plist"
 
-# Ad-hoc sign so the bundle has a stable-ish identity for TCC prompts.
-codesign --force --sign - "$APP" >/dev/null 2>&1 || true
+# Sign so the bundle has a stable identity for TCC and Keychain prompts. Ad-hoc by default;
+# set CODESIGN_IDENTITY to a certificate name so rebuilds don't re-prompt for Keychain access.
+codesign --force --sign "${CODESIGN_IDENTITY:--}" "$APP" >/dev/null 2>&1 || true
 
 echo "==> Relaunching…"
 killall NotchApp >/dev/null 2>&1 || true

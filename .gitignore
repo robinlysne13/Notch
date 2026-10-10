@@ -15,3 +15,6 @@ DerivedData/
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Xcode package workspace state
+.swiftpm/

@@ -3,6 +3,7 @@ import SwiftUI
 struct NowPlayingView: View {
     @ObservedObject var media: MediaController
     @ObservedObject var lyrics: LyricsProvider
+    @ObservedObject var sonos: SonosController
     @Binding var showLyrics: Bool
 
     var body: some View {
@@ -73,6 +74,39 @@ struct NowPlayingView: View {
         .help(showLyrics ? "Hide lyrics" : "Show lyrics")
     }
 
+    /// Which rooms play along, as a checklist. Only while a Sonos group is what's showing: the
+    /// Spotify and local sources have no say over Sonos grouping. Rides above the skip-forward
+    /// button the way the lyrics toggle rides above play.
+    @ViewBuilder
+    private var speakersMenu: some View {
+        if media.activeSource == .sonos, sonos.rooms.count > 1 {
+            let grouped = sonos.activeMembers.count > 1
+            Menu {
+                ForEach(sonos.rooms) { room in
+                    Toggle(room.name, isOn: Binding(
+                        get: { sonos.activeMembers.contains { $0.uuid == room.uuid } },
+                        set: { sonos.setGrouped(room, $0) }
+                    ))
+                    .disabled(room.uuid == sonos.activeGroup?.coordinatorUUID)
+                }
+            } label: {
+                Image(systemName: "hifispeaker.2.fill")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.white.opacity(grouped ? 1 : 0.45))
+                    .frame(width: 22, height: 20)
+                    .background(
+                        Circle().fill(Color.white.opacity(grouped ? 0.18 : 0))
+                    )
+                    .contentShape(Circle())
+            }
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Speakers")
+        }
+    }
+
     private var empty: some View {
         HStack(spacing: 8) {
             Image(systemName: "music.note")
@@ -112,6 +146,9 @@ struct NowPlayingView: View {
                     lyricsToggle.offset(y: Self.lyricsToggleRise)
                 }
             controlButton("forward.fill") { media.next() }
+                .overlay(alignment: .top) {
+                    speakersMenu.offset(y: Self.lyricsToggleRise)
+                }
         }
     }
 
