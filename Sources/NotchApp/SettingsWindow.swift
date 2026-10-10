@@ -7,14 +7,14 @@ import SwiftUI
 final class SettingsWindow {
     private var window: NSWindow?
 
-    func show(accounts: MailAccountStore, watcher: CodeWatcher) {
+    func show(spotify: SpotifyAuth, sonos: SonosController, accounts: MailAccountStore, watcher: CodeWatcher) {
         if let window {
             present(window)
             return
         }
-        let view = MailSettingsView(accounts: accounts, watcher: watcher)
+        let view = SettingsView(spotify: spotify, sonos: sonos, accounts: accounts, watcher: watcher)
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 440),
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 820),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -32,5 +32,26 @@ final class SettingsWindow {
         // explicitly activating first.
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
+    }
+}
+
+/// Spotify and Sonos on top, mail accounts below.
+private struct SettingsView: View {
+    @ObservedObject var spotify: SpotifyAuth
+    @ObservedObject var sonos: SonosController
+    @ObservedObject var accounts: MailAccountStore
+    @ObservedObject var watcher: CodeWatcher
+
+    var body: some View {
+        VStack(spacing: 0) {
+            SpotifySettingsView(auth: spotify)
+                .padding(18)
+            Divider()
+            SonosSettingsView(sonos: sonos)
+                .padding(18)
+            Divider()
+            MailSettingsView(accounts: accounts, watcher: watcher)
+        }
+        .frame(width: 420)
     }
 }

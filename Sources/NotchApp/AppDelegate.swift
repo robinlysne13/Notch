@@ -81,7 +81,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pointerMonitors: [Any] = []
     private var dragPoll: Timer?
     private var dragPasteboardCount = 0
-    private let media = MediaController()
+    private let spotify = SpotifyAuth()
+    private let sonos = SonosController()
+    private lazy var media = MediaController(spotify: spotify, sonos: sonos)
     private let lyrics = LyricsProvider()
     private let shelf = ShelfModel()
     private let accounts = MailAccountStore()
@@ -103,6 +105,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let rootView = NotchRootView(
             state: state,
             media: media,
+            sonos: sonos,
             lyrics: lyrics,
             shelf: shelf,
             codes: codes,
@@ -160,7 +163,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showSettings() {
-        settingsWindow.show(accounts: accounts, watcher: codes)
+        settingsWindow.show(spotify: spotify, sonos: sonos, accounts: accounts, watcher: codes)
     }
 
     // MARK: Pointer tracking

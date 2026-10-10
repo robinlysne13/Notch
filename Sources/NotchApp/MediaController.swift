@@ -1,9 +1,31 @@
 import AppKit
 import Combine
+import OSLog
 
-/// Reads and controls "Now Playing" from Spotify or Music via AppleScript.
-/// (Apple restricts the private MediaRemote framework to signed system apps, so scripting the
-/// player apps directly is the reliable third-party path. First run prompts for Automation access.)
+/// What one source currently reports.
+struct MediaSnapshot {
+    var title: String
+    var artist: String
+    var isPlaying: Bool
+    var artworkURL: String
+    /// Seconds; nil when the source can't say.
+    var position: Double?
+    var duration: Double
+    /// Shown under the artist: "Spotify · Kitchen", "Sonos · Family Room", "Music".
+    var label: String
+}
+
+enum MediaSourceKind {
+    case spotifyAPI
+    case sonos
+    case local
+}
+
+/// Reads and controls "Now Playing" from every enabled source and shows the one that is actually
+/// playing: the Spotify account (any Spotify Connect device), Sonos speakers on the LAN (music
+/// started from the Sonos app), and the Spotify or Music app on this Mac. With nothing playing
+/// anywhere, a paused source is shown; with none of those, nothing. Controls go to the shown one.
+@MainActor
 final class MediaController: ObservableObject {
     @Published var title: String = ""
     @Published var artist: String = ""
@@ -15,22 +37,52 @@ final class MediaController: ObservableObject {
     @Published var position: Double = 0
     @Published var duration: Double = 0
 
+    private let spotify: SpotifyAuth
+    private let spotifyPlayer: SpotifyPlayer
+    private let sonos: SonosController
+    private let local = LocalPlayerSource()
+    private var subscriptions: Set<AnyCancellable> = []
+
     private var timer: Timer?
     private var ticker: Timer?
+    private var poll: Task<Void, Never>?
     private var lastArtworkURL: String?
     /// Position last read from the player, and when it was read — the tick extrapolates from this.
     private var baseline: (position: Double, at: Date)?
     /// Ignore polled positions briefly after a seek, until the player catches up.
     private var seekGuardUntil: Date?
-    private let queue = DispatchQueue(label: "notch.media", qos: .userInitiated)
+    /// Same for play/pause: remote players report the old state for a beat after a command.
+    private var playGuardUntil: Date?
+    /// Which source the notch is showing, so controls reach the right player and the view can
+    /// offer source-specific extras (Sonos grouping).
+    @Published private(set) var activeSource: MediaSourceKind?
+    private var spotifyFailures = 0
+    private var lastSpotifySnapshot: MediaSnapshot?
+    private var lastNote = ""
+
+    init(spotify: SpotifyAuth, sonos: SonosController) {
+        self.spotify = spotify
+        self.spotifyPlayer = SpotifyPlayer(auth: spotify)
+        self.sonos = sonos
+        // A source switching on or off mid-track shouldn't leave its state on screen until the
+        // next poll; drop it and read fresh.
+        spotify.$isConnected.dropFirst().removeDuplicates()
+            .merge(with: sonos.$isEnabled.dropFirst().removeDuplicates())
+            .sink { [weak self] _ in
+                self?.lastSpotifySnapshot = nil
+                self?.clear()
+                self?.refresh()
+            }
+            .store(in: &subscriptions)
+    }
 
     func start() {
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            self?.refresh()
+            MainActor.assumeIsolated { self?.refresh() }
         }
         ticker = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
-            self?.tick()
+            MainActor.assumeIsolated { self?.tick() }
         }
     }
 
@@ -49,39 +101,97 @@ final class MediaController: ObservableObject {
     // MARK: Reading
 
     private func refresh() {
-        queue.async { [weak self] in
+        // A slow source shouldn't stack polls behind it.
+        guard poll == nil else { return }
+        poll = Task { [weak self] in
+            defer { self?.poll = nil }
             guard let self else { return }
-            let raw = self.runAppleScript(Self.readScript) ?? ""
-            let lines = raw.components(separatedBy: "\n")
-            DispatchQueue.main.async {
-                guard lines.count >= 4, !lines[0].isEmpty else {
-                    self.hasTrack = false
-                    self.isPlaying = false
-                    self.activeApp = ""
-                    self.artwork = nil
-                    self.lastArtworkURL = nil
-                    self.position = 0
-                    self.duration = 0
-                    self.baseline = nil
-                    return
-                }
-                self.activeApp = lines[0]
-                self.title = lines[1]
-                self.artist = lines[2]
-                self.isPlaying = (lines[3] == "playing")
-                self.hasTrack = true
-                let art = lines.count >= 5 ? lines[4] : ""
-                self.loadArtwork(urlString: art)
-                self.applyTiming(
-                    position: lines.count >= 6 ? Self.number(lines[5]) : nil,
-                    duration: lines.count >= 7 ? Self.number(lines[6]) : nil
-                )
+            async let fromSpotify: MediaSnapshot? = spotify.isConnected ? spotifySnapshot() : nil
+            async let fromSonos: MediaSnapshot? = sonos.isEnabled ? sonos.snapshot() : nil
+            async let fromLocal: MediaSnapshot? = local.snapshot()
+            let candidates: [(MediaSourceKind, MediaSnapshot?)] = [
+                (.spotifyAPI, await fromSpotify),
+                (.sonos, await fromSonos),
+                (.local, await fromLocal),
+            ]
+            let available = candidates.compactMap { kind, snapshot in snapshot.map { (kind, $0) } }
+            guard let (kind, snapshot) = available.first(where: { $0.1.isPlaying }) ?? available.first else {
+                note("nothing playing on any source")
+                activeSource = nil
+                clear()
+                return
             }
+            note("\(snapshot.isPlaying ? "playing" : "paused") via \(snapshot.label): \(snapshot.title)")
+            activeSource = kind
+            apply(snapshot)
         }
     }
 
-    private func applyTiming(position: Double?, duration: Double?) {
-        self.duration = max(duration ?? 0, 0)
+    /// The Spotify API's view, holding the last good reading through a few transient failures
+    /// (offline, rate-limited, token mid-refresh) rather than flashing "Nothing playing".
+    private func spotifySnapshot() async -> MediaSnapshot? {
+        do {
+            guard let state = try await spotifyPlayer.state() else {
+                spotifyFailures = 0
+                lastSpotifySnapshot = nil
+                return nil
+            }
+            spotifyFailures = 0
+            let snapshot = MediaSnapshot(
+                title: state.title,
+                artist: state.artist,
+                isPlaying: state.isPlaying,
+                artworkURL: state.artworkURL,
+                position: state.position,
+                duration: state.duration,
+                label: state.device.isEmpty ? "Spotify" : "Spotify · \(state.device)"
+            )
+            lastSpotifySnapshot = snapshot
+            return snapshot
+        } catch {
+            spotifyFailures += 1
+            note("Spotify poll failed: \(error.localizedDescription)")
+            if spotifyFailures >= 3 || !spotify.isConnected { lastSpotifySnapshot = nil }
+            return lastSpotifySnapshot
+        }
+    }
+
+    /// Logs each change in what is shown, so the unified log (subsystem com.robin.notch)
+    /// explains a "Nothing playing" without a debugger attached.
+    private func note(_ line: String) {
+        guard line != lastNote else { return }
+        lastNote = line
+        spotifyLog.notice("\(line, privacy: .public)")
+    }
+
+    private func clear() {
+        hasTrack = false
+        isPlaying = false
+        activeApp = ""
+        artwork = nil
+        lastArtworkURL = nil
+        position = 0
+        duration = 0
+        baseline = nil
+    }
+
+    private func apply(_ snapshot: MediaSnapshot) {
+        activeApp = snapshot.label
+        title = snapshot.title
+        artist = snapshot.artist
+        if let guardUntil = playGuardUntil, Date() < guardUntil {
+            // Keep the optimistic value until the player has caught up.
+        } else {
+            playGuardUntil = nil
+            isPlaying = snapshot.isPlaying
+        }
+        hasTrack = true
+        loadArtwork(urlString: snapshot.artworkURL)
+        applyTiming(position: snapshot.position, duration: snapshot.duration)
+    }
+
+    private func applyTiming(position: Double?, duration: Double) {
+        self.duration = max(duration, 0)
         // A just-issued seek hasn't necessarily landed in the player yet; keep our own value.
         if let guardUntil = seekGuardUntil, Date() < guardUntil { return }
         seekGuardUntil = nil
@@ -94,11 +204,6 @@ final class MediaController: ObservableObject {
         self.position = clamped
     }
 
-    /// AppleScript renders reals with the system decimal separator, which isn't always ".".
-    private static func number(_ field: String) -> Double? {
-        Double(field.replacingOccurrences(of: ",", with: "."))
-    }
-
     private func loadArtwork(urlString: String) {
         guard !urlString.isEmpty, urlString.hasPrefix("http") else {
             if !urlString.hasPrefix("http") { artwork = nil }
@@ -109,15 +214,47 @@ final class MediaController: ObservableObject {
         guard let url = URL(string: urlString) else { return }
         URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
             guard let data, let image = NSImage(data: data) else { return }
-            DispatchQueue.main.async { self?.artwork = image }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self?.artwork = image }
+            }
         }.resume()
     }
 
     // MARK: Controls
 
-    func playPause() { control("playpause") }
-    func next() { control("next track") }
-    func previous() { control("previous track") }
+    func playPause() {
+        let wasPlaying = isPlaying
+        switch activeSource {
+        case .spotifyAPI:
+            optimisticToggle(wasPlaying)
+            remoteCommand { [spotifyPlayer] in
+                if wasPlaying { try await spotifyPlayer.pause() } else { try await spotifyPlayer.play() }
+            }
+        case .sonos:
+            optimisticToggle(wasPlaying)
+            remoteCommand { [sonos] in
+                if wasPlaying { try await sonos.pause() } else { try await sonos.play() }
+            }
+        case .local, nil:
+            localCommand("playpause")
+        }
+    }
+
+    func next() {
+        switch activeSource {
+        case .spotifyAPI: remoteCommand { [spotifyPlayer] in try await spotifyPlayer.next() }
+        case .sonos: remoteCommand { [sonos] in try await sonos.next() }
+        case .local, nil: localCommand("next track")
+        }
+    }
+
+    func previous() {
+        switch activeSource {
+        case .spotifyAPI: remoteCommand { [spotifyPlayer] in try await spotifyPlayer.previous() }
+        case .sonos: remoteCommand { [sonos] in try await sonos.previous() }
+        case .local, nil: localCommand("previous track")
+        }
+    }
 
     /// Scrub to `seconds`. Optimistically moves the bar so dragging feels immediate.
     func seek(to seconds: Double) {
@@ -126,78 +263,47 @@ final class MediaController: ObservableObject {
         position = target
         baseline = (target, Date())
         seekGuardUntil = Date().addingTimeInterval(1.5)
-        let app = activeApp.isEmpty ? nil : activeApp
-        queue.async { [weak self] in
-            let target = String(format: "%.3f", target)
-            let player = app ?? self?.detectRunningPlayer() ?? "Music"
-            _ = self?.runAppleScript("tell application \"\(player)\" to set player position to \(target)")
+        switch activeSource {
+        case .spotifyAPI: remoteCommand { [spotifyPlayer] in try await spotifyPlayer.seek(to: target) }
+        case .sonos: remoteCommand { [sonos] in try await sonos.seek(to: target) }
+        case .local, nil: local.seek(to: target, app: localApp)
         }
     }
 
-    private func control(_ command: String) {
-        let app = activeApp.isEmpty ? nil : activeApp
-        queue.async { [weak self] in
-            let target = app ?? self?.detectRunningPlayer() ?? "Music"
-            _ = self?.runAppleScript("tell application \"\(target)\" to \(command)")
+    /// Flip the button immediately so it doesn't lag the click by a network round trip.
+    private func optimisticToggle(_ wasPlaying: Bool) {
+        isPlaying = !wasPlaying
+        playGuardUntil = Date().addingTimeInterval(1.5)
+        if !wasPlaying { baseline = (position, Date()) }
+    }
+
+    /// Runs a network command, then re-reads once the player has had a moment to apply it.
+    private func remoteCommand(_ operation: @escaping @MainActor () async throws -> Void) {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await operation()
+            } catch {
+                spotifyLog.error("command failed: \(error.localizedDescription, privacy: .public)")
+                if case SpotifyError.premiumRequired = error {
+                    spotify.lastError = error.localizedDescription
+                }
+            }
+            try? await Task.sleep(for: .milliseconds(600))
+            refresh()
+        }
+    }
+
+    private func localCommand(_ command: String) {
+        local.control(command, app: localApp)
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(300))
             self?.refresh()
         }
     }
 
-    private func detectRunningPlayer() -> String? {
-        let apps = NSWorkspace.shared.runningApplications.compactMap { $0.localizedName }
-        if apps.contains("Spotify") { return "Spotify" }
-        if apps.contains("Music") { return "Music" }
-        return nil
+    /// The scripted player's name while it is the one showing; otherwise let the source pick.
+    private var localApp: String? {
+        activeSource == .local && !activeApp.isEmpty ? activeApp : nil
     }
-
-    // MARK: AppleScript
-
-    private func runAppleScript(_ source: String) -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", source]
-        let outPipe = Pipe()
-        process.standardOutput = outPipe
-        process.standardError = Pipe()
-        do {
-            try process.run()
-        } catch {
-            return nil
-        }
-        let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        return String(data: data, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    /// Prefers Spotify if it has a track, otherwise falls back to Music.
-    /// Output is 7 linefeed-separated fields: app, title, artist, state, artworkURL, position, duration.
-    /// Position and duration are both normalized to seconds (Spotify reports duration in milliseconds).
-    private static let readScript = """
-    set lf to (ASCII character 10)
-    set out to ""
-    if application "Spotify" is running then
-        tell application "Spotify"
-            try
-                set pstate to player state as text
-                if pstate is not "stopped" then
-                    set out to "Spotify" & lf & (name of current track) & lf & (artist of current track) & lf & pstate & lf & (artwork url of current track) & lf & (player position as text) & lf & (((duration of current track) / 1000) as text)
-                end if
-            end try
-        end tell
-    end if
-    if out is "" then
-        if application "Music" is running then
-            tell application "Music"
-                try
-                    if player state is not stopped then
-                        set pstate to player state as text
-                        set out to "Music" & lf & (name of current track) & lf & (artist of current track) & lf & pstate & lf & lf & (player position as text) & lf & ((duration of current track) as text)
-                    end if
-                end try
-            end tell
-        end if
-    end if
-    return out
-    """
 }
