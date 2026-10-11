@@ -6,8 +6,7 @@ struct NotchRootView: View {
     @ObservedObject var lyrics: LyricsProvider
     @ObservedObject var library: SpotifyLibrary
     @ObservedObject var shelf: ShelfModel
-    @ObservedObject var codes: CodeWatcher
-    @ObservedObject var accounts: MailAccountStore
+    @ObservedObject var focus: FocusModel
     let openSettings: () -> Void
 
     /// Read live from `SMAppService` each time the context menu opens, so the toggle stays
@@ -37,8 +36,7 @@ struct NotchRootView: View {
             }
             .frame(width: size.width, height: size.height)
             .contextMenu {
-                Button("Mail Accounts…", action: openSettings)
-                Toggle("Copy Codes Automatically", isOn: $codes.autoCopy)
+                Button("Dashboard & Spotify…", action: openSettings)
                 Divider()
                 Toggle("Launch at Login", isOn: launchAtLogin)
             }
@@ -46,25 +44,38 @@ struct NotchRootView: View {
         .frame(width: state.windowSize.width, height: state.windowSize.height, alignment: .top)
     }
 
-    // Collapsed: a subtle live indicator when music is playing.
+    // Collapsed: a subtle live indicator for whatever is actually running.
     private var closedContent: some View {
         HStack {
             Spacer()
-            if codes.hasUnseenCode {
-                Image(systemName: "key.fill")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.green)
-                    .padding(.trailing, 10)
-                    // Draws the eye to the notch without the panel having to open itself.
-                    .transition(.scale.combined(with: .opacity))
-            } else if media.isPlaying {
-                Image(systemName: "waveform")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.75))
-                    .padding(.trailing, 10)
-            }
+            collapsedIndicator
+                .padding(.trailing, 10)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+    }
+
+    /// A running clock outranks the music: the countdown is the thing being waited on, and it is
+    /// the one piece of state that is worth reading without opening the panel at all.
+    @ViewBuilder
+    private var collapsedIndicator: some View {
+        if focus.hasUnseenFinish {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.green)
+                // Draws the eye to the notch without the panel having to open itself.
+                .transition(.scale.combined(with: .opacity))
+        } else if focus.isRunning {
+            TimelineView(.periodic(from: .now, by: 1)) { timeline in
+                Text(FocusMaths.mmss(focus.shown(at: timeline.date)))
+                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(.white.opacity(0.75))
+            }
+        } else if media.isPlaying {
+            Image(systemName: "waveform")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.75))
+        }
     }
 
     private var openContent: some View {
@@ -79,8 +90,8 @@ struct NotchRootView: View {
                         library: library,
                         showLyrics: $state.showLyrics
                     )
-                case .codes:
-                    CodesView(watcher: codes, accounts: accounts, openSettings: openSettings)
+                case .focus:
+                    FocusView(model: focus, openSettings: openSettings)
                 case .shelf:
                     ShelfView(shelf: shelf)
                 }
@@ -96,7 +107,7 @@ struct NotchRootView: View {
     private var tabBar: some View {
         HStack(spacing: 6) {
             tab("Now Playing", .nowPlaying)
-            tab("Codes", .codes, badge: codes.hasUnseenCode)
+            tab("Focus", .focus, badge: focus.hasUnseenFinish)
             tab("Shelf", .shelf)
         }
         .frame(maxWidth: .infinity)
@@ -106,7 +117,7 @@ struct NotchRootView: View {
         let selected = state.selectedTab == value
         return Button {
             withAnimation(.easeInOut(duration: 0.15)) { state.selectedTab = value }
-            if value == .codes { codes.enterTab() }
+            if value == .focus { focus.enterTab() }
         } label: {
             HStack(spacing: 4) {
                 Text(label)

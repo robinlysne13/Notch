@@ -1,15 +1,15 @@
 import Foundation
 import Security
 
-/// Minimal generic-password store. App-specific passwords never touch `UserDefaults` — only the
-/// account's address and provider live there (see `MailAccountStore`).
+/// Minimal generic-password store. Secrets never touch `UserDefaults` — only the things that
+/// aren't secret (a Spotify client id, the dashboard's email address) live there.
 enum Keychain {
-    /// Mail passwords and Spotify tokens are different kinds of secret, so they get their own
-    /// Keychain services — revoking one never disturbs the other.
-    static let mailService = "com.robin.notch.mail"
+    /// Spotify tokens and the dashboard password are different kinds of secret, so they get
+    /// their own Keychain services — revoking one never disturbs the other.
     static let spotifyService = "com.robin.notch.spotify"
+    static let dashboardService = "com.robin.notch.dashboard"
 
-    static func setPassword(_ password: String, account: String, service: String = mailService) {
+    static func setPassword(_ password: String, account: String, service: String) {
         // Delete-then-add rather than SecItemUpdate: it is one code path for both "new account"
         // and "password rotated", which is all this needs.
         delete(account: account, service: service)
@@ -24,7 +24,7 @@ enum Keychain {
         SecItemAdd(query as CFDictionary, nil)
     }
 
-    static func password(account: String, service: String = mailService) -> String? {
+    static func password(account: String, service: String) -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -39,7 +39,7 @@ enum Keychain {
         return String(data: data, encoding: .utf8)
     }
 
-    static func delete(account: String, service: String = mailService) {
+    static func delete(account: String, service: String) {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,

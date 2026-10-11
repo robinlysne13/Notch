@@ -1,7 +1,7 @@
 #!/bin/bash
-# Exercises the pure logic that is worth pinning down: verification-code extraction against
-# realistic message samples, the LRC lyric parsing behind the lyrics panel, and the playhead that
-# panel follows.
+# Exercises the pure logic that is worth pinning down: the focus clock and the sums the Focus tab
+# draws from it, the LRC lyric parsing behind the lyrics panel, and the playhead that panel
+# follows.
 #
 # Not a SwiftPM test target: the package is a single executable target, and testing one would mean
 # splitting the app into a library plus a shim. Compiling the handful of files each suite touches
@@ -22,13 +22,9 @@ run_suite() {
     echo
 }
 
-run_suite codefinder \
-    Tests/CodeFinderTests/main.swift \
-    "$SRC/VerificationCodeFinder.swift" \
-    "$SRC/MIME.swift" \
-    "$SRC/IMAPMailReader.swift" \
-    "$SRC/MailAccount.swift" \
-    "$SRC/Keychain.swift"
+run_suite focus \
+    Tests/FocusTests/main.swift \
+    "$SRC/Focus.swift"
 
 run_suite lyrics \
     Tests/LyricsTests/main.swift \
