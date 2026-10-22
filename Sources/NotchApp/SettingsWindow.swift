@@ -7,21 +7,14 @@ import SwiftUI
 final class SettingsWindow {
     private var window: NSWindow?
 
-    func show(account: DashboardAccount, focus: FocusModel, spotify: SpotifyAuth) {
+    func show(spotify: SpotifyAuth) {
         if let window {
             present(window)
             return
         }
-        // Two unrelated setups — a dashboard sign-in and a Spotify one — so they get a tab each
-        // rather than one long form.
-        let view = TabView {
-            DashboardSettingsView(account: account, focus: focus)
-                .tabItem { Label("Dashboard", systemImage: "timer") }
-            SpotifySettingsView(auth: spotify)
-                .tabItem { Label("Spotify", systemImage: "music.note") }
-        }
-        .padding(.top, 6)
-        .frame(width: 452, height: 470)
+        let view = SpotifySettingsView(auth: spotify)
+            .padding(.top, 6)
+            .frame(width: 452, height: 470)
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 452, height: 470),

@@ -76,13 +76,10 @@ final class PassthroughHostingView<Content: View>: NSHostingView<Content> {
 
 /// The notch's panel.
 ///
-/// A borderless window refuses to become key, which would leave the focus label impossible to
-/// type into. `becomesKeyOnlyIfNeeded` is what keeps that from costing anything elsewhere: the
-/// panel takes the keyboard only when a view that actually wants input is clicked, so pressing
-/// Start or scrubbing the progress bar never pulls the caret out of whatever you were writing in.
-final class NotchPanel: NSPanel {
-    override var canBecomeKey: Bool { true }
-}
+/// Nothing in it takes typing, so it never asks for the keyboard: a borderless panel declines key
+/// status by default, and leaving that alone means hovering the notch can't pull the caret out of
+/// whatever you were writing in. Buttons, scrolling and drops all work without it.
+final class NotchPanel: NSPanel {}
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -104,8 +101,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let spotifyAuth = SpotifyAuth()
     private lazy var spotifyLibrary = SpotifyLibrary(auth: spotifyAuth)
     private let shelf = ShelfModel()
-    private let dashboard = DashboardAccount()
-    private lazy var focus = FocusModel(account: dashboard)
     private let settingsWindow = SettingsWindow()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -126,7 +121,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             lyrics: lyrics,
             library: spotifyLibrary,
             shelf: shelf,
-            focus: focus,
             openSettings: { [weak self] in self?.showSettings() }
         )
         let hostingView = PassthroughHostingView(rootView: rootView)
@@ -144,7 +138,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.backgroundColor = .clear
         panel.hasShadow = false
         panel.isFloatingPanel = true
-        panel.becomesKeyOnlyIfNeeded = true
         panel.hidesOnDeactivate = false
         // Must sit above the menu bar (.mainMenu) but below the drag layer
         // (kCGDraggingWindowLevel, 500) — any higher and file drags render behind the
@@ -162,12 +155,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         observeScreenChanges()
         startPointerTracking()
         media.start()
-        // A countdown that rings while the notch is closed should be one hover away, not one
-        // hover plus a tab switch — so aim the panel at it as soon as it goes off.
-        focus.onRingOut = { [weak self] _ in
-            self?.state?.selectedTab = .focus
-        }
-        focus.start()
         LaunchAtLogin.syncOnLaunch()
     }
 
@@ -177,11 +164,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         dragPoll?.invalidate()
         dragPoll = nil
         stopHoverTick()
-        focus.stop()
     }
 
     private func showSettings() {
-        settingsWindow.show(account: dashboard, focus: focus, spotify: spotifyAuth)
+        settingsWindow.show(spotify: spotifyAuth)
     }
 
     // MARK: Pointer tracking
@@ -259,20 +245,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             startHoverTick()
         } else {
             stopHoverTick()
-            relinquishKeyboard()
         }
-    }
-
-    /// Hand the keyboard back on the way down. A panel left key with the focus label still first
-    /// responder would go on swallowing keystrokes meant for whatever is in front, and the notch
-    /// collapses on the pointer leaving — usually without a click anywhere else to take key off
-    /// it. Ordering out and straight back in is what drops key status; the panel is transparent
-    /// either side of it, so nothing is seen to happen.
-    private func relinquishKeyboard() {
-        guard let panel, panel.isKeyWindow else { return }
-        panel.makeFirstResponder(nil)
-        panel.orderOut(nil)
-        panel.orderFrontRegardless()
     }
 
     /// A pointer resting on the panel sends no further events, and a closing grace has to expire

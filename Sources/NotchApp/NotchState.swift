@@ -2,7 +2,6 @@ import SwiftUI
 
 enum NotchTab: Hashable {
     case nowPlaying
-    case focus
     case shelf
 }
 

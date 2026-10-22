@@ -2,12 +2,9 @@ import Foundation
 import Security
 
 /// Minimal generic-password store. Secrets never touch `UserDefaults` — only the things that
-/// aren't secret (a Spotify client id, the dashboard's email address) live there.
+/// aren't secret (a Spotify client id) live there.
 enum Keychain {
-    /// Spotify tokens and the dashboard password are different kinds of secret, so they get
-    /// their own Keychain services — revoking one never disturbs the other.
     static let spotifyService = "com.robin.notch.spotify"
-    static let dashboardService = "com.robin.notch.dashboard"
 
     static func setPassword(_ password: String, account: String, service: String) {
         // Delete-then-add rather than SecItemUpdate: it is one code path for both "new account"
