@@ -20,7 +20,6 @@ struct FocusView: View {
     /// The label as the field has it. See `label`.
     @State private var typed = ""
 
-    private static let teal = Color(red: 0.03, green: 0.70, blue: 0.80)
     private static let green = Color(red: 0.09, green: 0.64, blue: 0.29)
 
     var body: some View {
@@ -73,19 +72,24 @@ struct FocusView: View {
         let clock = model.clock
         let done = clock.isDone(at: now) && !clock.running
         let ring: Color = clock.dir == .down
-            ? (done ? Self.green : Self.teal)
-            : .white.opacity(0.35)
+            ? (done ? Self.green : .white)
+            : .white.opacity(0.5)
+        // A thin line kept inside the frame reads as a sharp edge; a thick one centred on the
+        // frame's edge spills half a stroke over it and goes soft.
+        let line: CGFloat = 4
 
         return ZStack {
             Circle()
-                .stroke(Color.white.opacity(0.10), lineWidth: 6)
+                .inset(by: line / 2)
+                .stroke(Color.white.opacity(0.16), lineWidth: line)
             // Nothing left to draw is drawn as nothing: a rounded cap on a zero-length arc
             // leaves a stub floating at twelve o'clock.
             let fraction = clock.fraction(at: now)
             if fraction > 0.002 {
                 Circle()
+                    .inset(by: line / 2)
                     .trim(from: 0, to: fraction)
-                    .stroke(ring, style: StrokeStyle(lineWidth: 6, lineCap: .round))
+                    .stroke(ring, style: StrokeStyle(lineWidth: line, lineCap: .butt))
                     .rotationEffect(.degrees(-90))
             }
             VStack(spacing: 1) {
@@ -165,7 +169,7 @@ struct FocusView: View {
                 Text(clock.running ? "Pause" : resumable ? "Resume" : "Start")
                     .frame(width: 54)
             }
-            .buttonStyle(NotchButtonStyle(prominent: true, tint: Self.teal))
+            .buttonStyle(NotchButtonStyle(prominent: true, outlined: true))
 
             Button { model.finish() } label: {
                 Text("✓ Done")
@@ -214,12 +218,15 @@ struct FocusView: View {
                 Button { model.setLength(minutes: minutes) } label: {
                     Text("\(minutes)m")
                         .font(.system(size: 9, weight: on ? .semibold : .medium))
-                        .foregroundStyle(on ? Self.teal : .white.opacity(0.45))
+                        .foregroundStyle(on ? .white : .white.opacity(0.45))
                         .padding(.horizontal, 7)
                         .padding(.vertical, 2)
                         .background(
-                            Capsule().fill(Color.white.opacity(on ? 0.14 : 0.06))
+                            Capsule().fill(on ? Color.black : Color.white.opacity(0.06))
                         )
+                        .overlay {
+                            if on { Capsule().strokeBorder(.white, lineWidth: 1) }
+                        }
                 }
                 .buttonStyle(.plain)
             }
@@ -266,7 +273,7 @@ struct FocusView: View {
                 let height = max(1, CGFloat(day.minutes) / CGFloat(ceiling) * 14)
                 RoundedRectangle(cornerRadius: 0.5)
                     .fill(day.minutes >= model.goal && model.goal > 0
-                          ? Self.teal.opacity(0.85)
+                          ? Color.white.opacity(0.9)
                           : Color.white.opacity(day.minutes > 0 ? 0.35 : 0.12))
                     .frame(width: 3, height: height)
             }
@@ -309,22 +316,29 @@ struct FocusView: View {
 /// Small translucent control that reads correctly on the notch's solid black.
 struct NotchButtonStyle: ButtonStyle {
     var prominent = false
-    /// A prominent button can take the dashboard's teal, so the one thing you came to press
-    /// looks the same here as it does on the web page.
+    /// A prominent button can take a solid colour, so the one thing you came to press stands out.
     var tint: Color?
+    /// Black with a white rim and white text, for a button that should stand out without colour.
+    var outlined = false
 
     @Environment(\.isEnabled) private var isEnabled
 
     func makeBody(configuration: Configuration) -> some View {
-        let fill = tint.map { $0.opacity(configuration.isPressed ? 0.7 : 1) }
+        let fill = outlined ? Color.black
+            : tint.map { $0.opacity(configuration.isPressed ? 0.7 : 1) }
             ?? Color.white.opacity(prominent ? 0.22 : 0.12)
         return configuration.label
             .font(.system(size: 10, weight: .medium))
             .foregroundStyle(.white.opacity(
-                !isEnabled ? 0.3 : configuration.isPressed ? 0.6 : 0.9
+                !isEnabled ? 0.3 : configuration.isPressed ? 0.6 : outlined ? 1 : 0.9
             ))
             .padding(.horizontal, 10)
             .padding(.vertical, 4)
             .background(Capsule().fill(isEnabled ? fill : Color.white.opacity(0.06)))
+            .overlay {
+                if outlined {
+                    Capsule().strokeBorder(.white.opacity(configuration.isPressed ? 0.6 : 1), lineWidth: 1)
+                }
+            }
     }
 }

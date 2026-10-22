@@ -156,7 +156,7 @@ final class LyricsProvider: ObservableObject {
             break
         }
 
-        switch await search(title: title, artist: artist, session: session) {
+        switch await search(title: title, artist: artist, duration: duration, session: session) {
         case .ok(let track):
             let found = interpret(track)
             if found.status == .synced {
@@ -197,6 +197,7 @@ final class LyricsProvider: ObservableObject {
     private static func search(
         title: String,
         artist: String,
+        duration: Double,
         session: URLSession,
     ) async -> Reply<Track> {
         let query = [
@@ -206,14 +207,56 @@ final class LyricsProvider: ObservableObject {
         let results: Reply<[Track]> = await request(path: "/api/search", query: query, session: session)
         switch results {
         case .ok(let tracks):
-            // Prefer a hit that actually carries timings over the first one listed.
-            let best = tracks.first { $0.syncedLyrics?.isEmpty == false } ?? tracks.first
-            return best.map { .ok($0) } ?? .empty
+            return pick(from: tracks, duration: duration).map { .ok($0) } ?? .empty
         case .empty:
             return .empty
         case .failed:
             return .failed
         }
+    }
+
+    /// The copy of a song whose sheet is worth showing.
+    ///
+    /// The search endpoint takes no duration and lists every copy LRCLIB holds — the album cut, a
+    /// video rip, a sped-up edit — in no particular order. Stamps belong to one recording, so
+    /// taking the first timed hit is how a sheet from a cut twenty seconds shorter gets shown: the
+    /// words are right, which is why it looks like it is working, and the highlight falls further
+    /// behind with every line. The copy whose length matches the track is the one whose stamps
+    /// mean anything.
+    ///
+    /// When no timed copy is this recording, the words are still the words — so the closest sheet
+    /// is kept with its timings dropped. A sheet that scrolls and admits it cannot follow is
+    /// better than one that confidently points at the wrong line.
+    private static func pick(from tracks: [Track], duration: Double) -> Track? {
+        guard duration > 0 else {
+            return tracks.first { $0.syncedLyrics?.isEmpty == false } ?? tracks.first
+        }
+        let candidates = tracks.map {
+            (duration: $0.duration, isTimed: $0.syncedLyrics?.isEmpty == false)
+        }
+        if let match = timedMatch(among: candidates, trackDuration: duration) {
+            return tracks[match]
+        }
+        let closest = tracks.min {
+            abs(($0.duration ?? 0) - duration) < abs(($1.duration ?? 0) - duration)
+        }
+        return (closest ?? tracks.first)?.untimed
+    }
+
+    /// How far a copy's length may sit from the playing track and still be the same recording.
+    /// Wide enough for rounding and a remaster, far tighter than the gap between a cut and an edit.
+    nonisolated static var durationTolerance: Double { 4 }
+
+    /// Index of the timed copy whose length best matches `trackDuration`, or nil when none of them
+    /// is close enough to be the same recording.
+    nonisolated static func timedMatch(
+        among candidates: [(duration: Double?, isTimed: Bool)],
+        trackDuration: Double
+    ) -> Int? {
+        func gap(_ index: Int) -> Double { abs((candidates[index].duration ?? 0) - trackDuration) }
+        return candidates.indices
+            .filter { candidates[$0].isTimed && gap($0) <= durationTolerance }
+            .min { gap($0) < gap($1) }
     }
 
     /// Whether LRCLIB answered, and what it said. The distinction matters because a `.failed`
@@ -262,9 +305,21 @@ final class LyricsProvider: ObservableObject {
     }
 
     private struct Track: Decodable {
+        /// The length of this copy, in seconds — what says whether its stamps are this recording's.
+        let duration: Double?
         let instrumental: Bool?
         let plainLyrics: String?
         let syncedLyrics: String?
+
+        /// The same sheet with its stamps dropped, for when they belong to another cut.
+        var untimed: Track {
+            Track(
+                duration: duration,
+                instrumental: instrumental,
+                plainLyrics: plainLyrics,
+                syncedLyrics: nil
+            )
+        }
     }
 
     private static func interpret(_ track: Track) -> (status: Status, lines: [LyricLine]) {

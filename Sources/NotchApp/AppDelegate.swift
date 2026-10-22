@@ -91,6 +91,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pointerMonitors: [Any] = []
     private var dragPoll: Timer?
     private var dragPasteboardCount = 0
+    /// Whether the mouse-down being watched turned into a real drag. Every click starts a watch,
+    /// and only a drag's ending is worth reporting to the hover rule.
+    private var sawDrag = false
     /// Decides whether an open was meant, and how long it survives the pointer leaving.
     private var hover = NotchHover()
     /// Runs only while the panel is open: rest and the closing grace both have to pass without
@@ -210,9 +213,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func handle(_ event: NSEvent) {
-        // Acting on the panel settles the question of whether it was meant to be open.
+        // Acting on the panel is reported, not interpreted: whether one skipped track is reason
+        // to hold the panel open is the hover rule's business.
         if event.type == .leftMouseDown || event.type == .scrollWheel, isPointerOnChrome {
-            hover.acted()
+            hover.acted(.touch, pointer: NSEvent.mouseLocation, now: Date())
         }
         if event.type == .leftMouseDown {
             beginDragWatch()
@@ -298,6 +302,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// down; if it changes while the button is held, a drag is in flight and worth polling for.
     private func beginDragWatch() {
         dragPoll?.invalidate()
+        sawDrag = false
         dragPasteboardCount = NSPasteboard(name: .drag).changeCount
         let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self] timer in
             MainActor.assumeIsolated { self?.pollDrag(timer) }
@@ -312,10 +317,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard NSEvent.pressedMouseButtons & 1 != 0 else {
             timer.invalidate()
             dragPoll = nil
+            // A drag that has been let go of is an errand finished — files onto the shelf, or
+            // something taken off it — so the panel goes back to needing a reason to stay. Plain
+            // clicks are already reported by `handle`; this fires only for a real drag.
+            if sawDrag {
+                hover.acted(.dragEnded, pointer: NSEvent.mouseLocation, now: Date())
+            }
             syncPointer()
             return
         }
         guard isDraggingFiles else { return }
+        sawDrag = true
 
         // Stay drop-eligible for the whole drag: a window that ignores mouse events can't be a
         // drag destination at all, and one that accepts nothing under the cursor simply lets the

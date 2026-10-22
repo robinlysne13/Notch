@@ -1,10 +1,11 @@
 import CoreGraphics
 import Foundation
 
-// Pins down when the notch panel is allowed to stay open. The rule has to serve two opposite
-// habits at once: sweeping across the top of the screen to reach Chrome's tab strip, which opens
-// the panel by accident and wants it gone at once, and reaching into the panel for a button,
-// which wants it to survive an overshoot.
+// Pins down when the notch panel is allowed to stay open. The rule has to serve three habits at
+// once: sweeping across the top of the screen to reach Chrome's tab strip, which opens the panel
+// by accident and wants it gone at once; reaching into the panel for a button, which wants it to
+// survive an overshoot; and reaching in for one thing only — a skipped track, a file dropped on
+// the shelf — which wants it out of the way the moment that errand is done.
 
 var failures = 0
 var passed = 0
@@ -36,6 +37,24 @@ func mid(_ rect: CGRect) -> CGPoint { CGPoint(x: rect.midX, y: rect.midY) }
 /// A point on the closed notch that is still on the panel once it has grown — which is where the
 /// pointer necessarily is at the moment the panel opens under it.
 let onNotch = CGPoint(x: 600, y: 916)
+
+/// Somewhere else entirely — far enough that a pointer there has plainly gone, so a committed
+/// panel owes it no wait at all.
+let away = CGPoint(x: 1200, y: 300)
+
+/// Clear of the sticky margin, but only just: a pointer that has stepped off the panel rather
+/// than left it, and so is owed very nearly the whole grace.
+let justClear = CGPoint(x: 600, y: openChrome.minY - 60)
+
+/// A panel committed the way a visitor commits one: opened, then rested on for the dwell. Used by
+/// the tests that are about what a committed panel does rather than how it got that way. Committed
+/// as of `at(0.35)`.
+func visited() -> NotchHover {
+    var hover = NotchHover()
+    _ = hover.evaluate(pointer: onNotch, chrome: closedChrome, now: at(0))
+    _ = hover.evaluate(pointer: onNotch, chrome: openChrome, now: at(0.35))
+    return hover
+}
 
 // MARK: Opening
 
@@ -126,31 +145,148 @@ do {
     check("settling after the jump commits from there", moving.phase == .committed)
 }
 
-// MARK: Clicking or scrolling commits outright
+// MARK: One errand, and then away
+//
+// Reaching in to skip a single track. The click is the whole visit, so the panel has to leave
+// with the pointer rather than hold the screen for the grace period afterwards.
 
 do {
     var hover = NotchHover()
     _ = hover.evaluate(pointer: onNotch, chrome: closedChrome, now: at(0))
-    hover.acted()
-    check("a click commits without waiting for the dwell", hover.phase == .committed)
+    hover.acted(.touch, pointer: onNotch, now: at(0.1))
+    check("one click does not commit the panel", hover.phase == .passing)
+    checkEqual(
+        "so leaving after a single errand closes at once",
+        hover.evaluate(pointer: away, chrome: openChrome, now: at(0.2)),
+        .close
+    )
+}
 
-    // And having committed, it survives leaving.
-    let left = hover.evaluate(pointer: CGPoint(x: 900, y: 400), chrome: openChrome, now: at(0.1))
-    checkEqual("a committed panel does not close on the way out", left, NotchHover.Action.none)
+do {
+    // Even a panel already committed by a long hover: the errand is the last word on it.
+    var hover = visited()
+    check("resting committed it", hover.phase == .committed)
+    hover.acted(.touch, pointer: onNotch, now: at(0.5))
+    check("an errand hands a committed panel back to the pointer", hover.phase == .passing)
+    checkEqual(
+        "and it closes on the way out",
+        hover.evaluate(pointer: away, chrome: openChrome, now: at(0.6)),
+        .close
+    )
+}
+
+// MARK: Clicking around
+
+do {
+    // A second act is someone working the panel, not running an errand.
+    var hover = NotchHover()
+    _ = hover.evaluate(pointer: onNotch, chrome: closedChrome, now: at(0))
+    hover.acted(.touch, pointer: onNotch, now: at(0.1))
+    hover.acted(.touch, pointer: onNotch, now: at(0.4))
+    check("a second act commits without waiting for a dwell", hover.phase == .committed)
+    checkEqual(
+        "and a committed panel does not close as the pointer steps off it",
+        hover.evaluate(pointer: justClear, chrome: openChrome, now: at(0.5)),
+        NotchHover.Action.none
+    )
+
+    // Further acts leave it committed rather than demoting it again.
+    hover.acted(.touch, pointer: onNotch, now: at(0.6))
+    check("still committed after a third", hover.phase == .committed)
+}
+
+do {
+    // Scrolling the lyrics is the same evidence by a different route, and arrives in bursts.
+    var hover = NotchHover()
+    _ = hover.evaluate(pointer: onNotch, chrome: closedChrome, now: at(0))
+    hover.acted(.touch, pointer: onNotch, now: at(0.1))
+    hover.acted(.touch, pointer: onNotch, now: at(0.12))
+    check("a scroll flick commits it", hover.phase == .committed)
+}
+
+do {
+    // Staying put after the errand commits it too — the dwell measured from the act rather than
+    // from whenever the pointer first arrived.
+    var hover = NotchHover()
+    _ = hover.evaluate(pointer: onNotch, chrome: closedChrome, now: at(0))
+    hover.acted(.touch, pointer: onNotch, now: at(0.1))
+    _ = hover.evaluate(pointer: onNotch, chrome: openChrome, now: at(0.35))
+    check("the pre-act dwell does not carry over", hover.phase == .passing)
+    _ = hover.evaluate(pointer: onNotch, chrome: openChrome, now: at(0.45))
+    check("resting on after the errand commits it", hover.phase == .committed)
+}
+
+// MARK: Dragging, which is one errand however it started
+
+do {
+    // Something dragged off the shelf: the mouse-down lands on the panel, the release doesn't.
+    var hover = NotchHover()
+    _ = hover.evaluate(pointer: onNotch, chrome: closedChrome, now: at(0))
+    hover.acted(.touch, pointer: onNotch, now: at(0.1))
+    hover.acted(.dragEnded, pointer: away, now: at(0.9))
+    check("picking up and letting go is one act, not two", hover.phase == .passing)
+    checkEqual(
+        "so the shelf closes behind a file dragged out of it",
+        hover.evaluate(pointer: away, chrome: openChrome, now: at(0.95)),
+        .close
+    )
+}
+
+do {
+    // Files dragged in: the panel opened committed, because aiming a drag at the notch is as
+    // deliberate as it gets. The drop ends that.
+    var hover = NotchHover()
+    hover.openDeliberately()
+    hover.acted(.dragEnded, pointer: onNotch, now: at(1.0))
+    check("the drop hands the panel back to the pointer", hover.phase == .passing)
+    checkEqual(
+        "leaving after the drop closes at once",
+        hover.evaluate(pointer: away, chrome: openChrome, now: at(1.1)),
+        .close
+    )
+}
+
+do {
+    // ...but staying to look at what landed holds it, like any other rest.
+    var hover = NotchHover()
+    hover.openDeliberately()
+    hover.acted(.dragEnded, pointer: onNotch, now: at(1.0))
+    _ = hover.evaluate(pointer: onNotch, chrome: openChrome, now: at(1.4))
+    check("resting after the drop commits it again", hover.phase == .committed)
+}
+
+do {
+    // Acts are counted per visit: two errands either side of a close are not clicking around.
+    var hover = NotchHover()
+    _ = hover.evaluate(pointer: onNotch, chrome: closedChrome, now: at(0))
+    hover.acted(.touch, pointer: onNotch, now: at(0.1))
+    checkEqual(
+        "the first visit closes on its errand",
+        hover.evaluate(pointer: away, chrome: openChrome, now: at(0.2)),
+        .close
+    )
+    _ = hover.evaluate(pointer: onNotch, chrome: closedChrome, now: at(5))
+    hover.acted(.touch, pointer: onNotch, now: at(5.1))
+    check("and the next one starts counting from nothing", hover.phase == .passing)
+}
+
+do {
+    // A click on the collapsed notch is not an act on a panel that isn't open.
+    var hover = NotchHover()
+    hover.acted(.touch, pointer: onNotch, now: at(0))
+    check("acting on a closed notch is ignored", !hover.isOpen)
 }
 
 // MARK: Overshooting a button
 
 do {
-    var hover = NotchHover()
-    _ = hover.evaluate(pointer: onNotch, chrome: closedChrome, now: at(0))
-    hover.acted()
+    var hover = visited()
 
     // Reaching for a button at the bottom edge and overshooting by 20pt.
     let overshoot = CGPoint(x: openChrome.midX, y: openChrome.minY - 20)
     checkEqual(
         "a small overshoot holds",
-        hover.evaluate(pointer: overshoot, chrome: openChrome, now: at(0.2)),
+        hover.evaluate(pointer: overshoot, chrome: openChrome, now: at(0.4)),
         .none
     )
     // Still held a long time later: inside the slop, the clock never even starts.
@@ -173,24 +309,20 @@ do {
 // MARK: Leaving properly
 
 do {
-    var hover = NotchHover()
-    _ = hover.evaluate(pointer: onNotch, chrome: closedChrome, now: at(0))
-    hover.acted()
-
-    let away = CGPoint(x: 1200, y: 300)
+    var hover = visited()
     checkEqual(
-        "going well clear starts the grace rather than closing",
-        hover.evaluate(pointer: away, chrome: openChrome, now: at(1.0)),
+        "stepping just clear starts the grace rather than closing",
+        hover.evaluate(pointer: justClear, chrome: openChrome, now: at(1.0)),
         .none
     )
     checkEqual(
         "still open part way through the grace",
-        hover.evaluate(pointer: away, chrome: openChrome, now: at(1.3)),
+        hover.evaluate(pointer: justClear, chrome: openChrome, now: at(1.3)),
         .none
     )
     checkEqual(
         "and it closes once the grace is up",
-        hover.evaluate(pointer: away, chrome: openChrome, now: at(1.6)),
+        hover.evaluate(pointer: justClear, chrome: openChrome, now: at(1.6)),
         .close
     )
     check("properly closed", !hover.isOpen)
@@ -198,22 +330,68 @@ do {
 
 do {
     // Coming back during the grace cancels it outright, rather than closing late.
-    var hover = NotchHover()
-    _ = hover.evaluate(pointer: onNotch, chrome: closedChrome, now: at(0))
-    hover.acted()
-
-    let away = CGPoint(x: 1200, y: 300)
-    _ = hover.evaluate(pointer: away, chrome: openChrome, now: at(1.0))
+    var hover = visited()
+    _ = hover.evaluate(pointer: justClear, chrome: openChrome, now: at(1.0))
     _ = hover.evaluate(pointer: mid(openChrome), chrome: openChrome, now: at(1.2))
     checkEqual(
         "returning cancels the grace instead of closing late",
-        hover.evaluate(pointer: away, chrome: openChrome, now: at(1.6)),
+        hover.evaluate(pointer: justClear, chrome: openChrome, now: at(1.6)),
         .none
     )
     check("still open", hover.isOpen)
     checkEqual(
         "and the grace restarts from the second departure",
-        hover.evaluate(pointer: away, chrome: openChrome, now: at(2.2)),
+        hover.evaluate(pointer: justClear, chrome: openChrome, now: at(2.2)),
+        .close
+    )
+}
+
+// MARK: Going properly away
+//
+// The grace is for a pointer hesitating at the edge. Distance says the opposite, so the further
+// out the pointer is, the less of the wait is left — and a pointer right across the screen is
+// owed none of it.
+
+do {
+    var hover = visited()
+    checkEqual(
+        "a pointer well clear of the panel takes it along at once",
+        hover.evaluate(pointer: away, chrome: openChrome, now: at(1.0)),
+        .close
+    )
+    check("properly closed", !hover.isOpen)
+}
+
+do {
+    // Partway out: more than an overshoot, less than gone. Half the distance to `bail` leaves
+    // half the grace, so it holds for a quarter of a second rather than half of one.
+    var hover = visited()
+    let halfway = CGPoint(x: 600, y: openChrome.minY - 130)
+    checkEqual(
+        "a middling departure holds at first",
+        hover.evaluate(pointer: halfway, chrome: openChrome, now: at(1.0)),
+        .none
+    )
+    checkEqual(
+        "still open at a fifth of a second",
+        hover.evaluate(pointer: halfway, chrome: openChrome, now: at(1.2)),
+        .none
+    )
+    checkEqual(
+        "and gone by a quarter, where a near miss would have had half a second",
+        hover.evaluate(pointer: halfway, chrome: openChrome, now: at(1.26)),
+        .close
+    )
+}
+
+do {
+    // Carrying on away spends the wait down instead of restarting it: the deadline is reckoned
+    // from the first step clear, and walking further out brings it forward.
+    var hover = visited()
+    _ = hover.evaluate(pointer: justClear, chrome: openChrome, now: at(1.0))
+    checkEqual(
+        "walking on out closes without waiting for the near-miss grace",
+        hover.evaluate(pointer: away, chrome: openChrome, now: at(1.1)),
         .close
     )
 }

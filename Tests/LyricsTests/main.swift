@@ -235,8 +235,12 @@ final class ShapedLRCLIB: URLProtocol {
     }
 }
 
-let plainSheet = #"{"instrumental":false,"plainLyrics":"one\ntwo\nthree"}"#
-let syncedSheet = #"{"instrumental":false,"syncedLyrics":"[00:01.00] one\n[00:05.00] two"}"#
+// Every sheet carries the length of the copy it was written against, as LRCLIB's own do: it is
+// what says whether a set of stamps belongs to the track being played.
+let plainSheet = #"{"duration":200,"instrumental":false,"plainLyrics":"one\ntwo\nthree"}"#
+let syncedSheet = #"{"duration":200,"instrumental":false,"syncedLyrics":"[00:01.00] one\n[00:05.00] two"}"#
+/// A timed sheet for a different, shorter cut of the same song.
+let otherCut = #"{"duration":170,"instrumental":false,"plainLyrics":"one\ntwo","syncedLyrics":"[00:01.00] one\n[00:04.00] two"}"#
 
 await { @MainActor in
     @MainActor func provider() -> LyricsProvider {
@@ -253,6 +257,25 @@ await { @MainActor in
     await settle(upgraded)
     checkEqual("an untimed exact match falls through to the timed one", upgraded.status, .synced)
     checkEqual("and it is the timed sheet that is shown", upgraded.lines.count, 2)
+
+    // The only timed copy is another cut. Its words are the song's, so they are worth showing —
+    // but its stamps are not this recording's, and following them walks the highlight off the
+    // line being sung.
+    ShapedLRCLIB.get = plainSheet
+    ShapedLRCLIB.search = "[\(otherCut)]"
+    let wrongCut = provider()
+    wrongCut.load(title: "A2", artist: "Artist", duration: 200)
+    await settle(wrongCut)
+    checkEqual("a timed sheet from another cut is not followed", wrongCut.status, .plain)
+
+    // Listed first is not the same as right: the matching copy has to win on length.
+    ShapedLRCLIB.get = #"{}"#
+    ShapedLRCLIB.search = "[\(otherCut),\(syncedSheet)]"
+    let laterMatch = provider()
+    laterMatch.load(title: "A3", artist: "Artist", duration: 200)
+    await settle(laterMatch)
+    checkEqual("the copy matching the track is found further down the list", laterMatch.status, .synced)
+    checkEqual("and it is that copy's timings that are used", laterMatch.lines.count, 2)
 
     // Nothing is timed anywhere, so the exact match is still the best answer available.
     ShapedLRCLIB.get = plainSheet
@@ -372,6 +395,43 @@ checkEqual(
 // A sheet shorter than the panel has nowhere to go.
 checkEqual("a single line pins the sheet", layout.clamped(-400, count: 1, in: 100, heights: even), 40)
 checkEqual("an empty sheet cannot be browsed", layout.clamped(-400, count: 0, in: 100, heights: even), 0)
+
+// MARK: Picking the right copy of a song
+
+// The search endpoint lists every copy LRCLIB holds, in no useful order and with no regard for
+// how long the playing track is. Stamps only mean anything for the recording they were written
+// against, so the copy that matches the track's length is the one worth following.
+
+typealias Copy = (duration: Double?, isTimed: Bool)
+
+// The case that started this: a 4:15 track, with a 3:53 cut listed first.
+let listing: [Copy] = [
+    (233.0, true),
+    (255.0, true),
+    (151.0, true),
+    (254.84, true),
+]
+checkEqual("the copy matching the track wins, not the first listed",
+           LyricsProvider.timedMatch(among: listing, trackDuration: 254.876), 3)
+checkEqual("rounding in either direction still matches",
+           LyricsProvider.timedMatch(among: [(255.0, true)], trackDuration: 254.876), 0)
+checkEqual("a cut of another length is not this recording",
+           LyricsProvider.timedMatch(among: [(233.0, true)], trackDuration: 254.876), nil)
+checkEqual("an untimed copy is never the match, however well it fits",
+           LyricsProvider.timedMatch(among: [(254.9, false)], trackDuration: 254.876), nil)
+checkEqual("a copy that never says how long it is cannot be matched",
+           LyricsProvider.timedMatch(among: [(nil, true)], trackDuration: 254.876), nil)
+checkEqual("nothing listed, nothing matched",
+           LyricsProvider.timedMatch(among: [], trackDuration: 254.876), nil)
+// The tolerance is a boundary, so pin both sides of it.
+let edge = LyricsProvider.durationTolerance
+checkEqual("a copy exactly at the tolerance still counts",
+           LyricsProvider.timedMatch(among: [(200 + edge, true)], trackDuration: 200), 0)
+checkEqual("a copy just past it does not",
+           LyricsProvider.timedMatch(among: [(200 + edge + 0.01, true)], trackDuration: 200), nil)
+// Ties go to whichever is listed first, which is LRCLIB's own idea of relevance.
+checkEqual("equally close copies fall back to the listed order",
+           LyricsProvider.timedMatch(among: [(201.0, true), (199.0, true)], trackDuration: 200), 0)
 
 print("\n\(passed) passed, \(failures) failed")
 exit(failures == 0 ? 0 : 1)

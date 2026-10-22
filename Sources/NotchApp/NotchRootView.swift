@@ -20,19 +20,26 @@ struct NotchRootView: View {
 
     var body: some View {
         let size = state.isOpen ? state.openSize : state.closedSize
+        let shape = NotchShape(
+            bottomRadius: state.isOpen ? 22 : 10,
+            topRadius: state.isOpen ? 12 : 7
+        )
         ZStack(alignment: .top) {
-            NotchShape(
-                bottomRadius: state.isOpen ? 22 : 10,
-                topRadius: state.isOpen ? 12 : 7
-            )
+            shape
             .fill(Color(nsColor: NSColor(calibratedWhite: 0, alpha: 1)))
             .overlay(alignment: .top) {
-                if state.isOpen {
-                    openContent
-                        .transition(.opacity)
-                } else {
-                    closedContent
+                ZStack(alignment: .top) {
+                    if state.isOpen {
+                        openContent
+                            .transition(panelTransition)
+                    } else {
+                        closedContent
+                    }
                 }
+                // The contents belong to the chrome rather than sitting on top of it: clipped to
+                // the same shrinking shape, nothing is ever left standing outside the notch while
+                // it closes.
+                .clipShape(shape)
             }
             .frame(width: size.width, height: size.height)
             .contextMenu {
@@ -42,6 +49,35 @@ struct NotchRootView: View {
             }
         }
         .frame(width: state.windowSize.width, height: state.windowSize.height, alignment: .top)
+    }
+
+    /// Closing is one movement: the panel's contents travel with the chrome instead of dissolving
+    /// in place while the black slides out from under them. They shrink towards the notch at the
+    /// chrome's own rate — scaled rather than re-laid-out, so the clock and its label keep their
+    /// arrangement all the way down instead of reflowing as they go.
+    ///
+    /// Opening is not that movement reversed. Grown from the same point, the contents are legible
+    /// inside the notch before there is anywhere to put them, and the panel reads as arriving
+    /// ahead of itself. So the chrome goes first and the contents settle into the room it has
+    /// made: a short fade, barely scaled, starting once the black is most of the way out.
+    private var panelTransition: AnyTransition {
+        .asymmetric(insertion: arrive, removal: shrink)
+    }
+
+    private var shrink: AnyTransition {
+        let open = state.openSize
+        guard open.width > 0, open.height > 0 else { return .opacity }
+        let scale = min(
+            state.closedSize.width / open.width,
+            state.closedSize.height / open.height
+        )
+        return .scale(scale: scale, anchor: .top).combined(with: .opacity)
+    }
+
+    private var arrive: AnyTransition {
+        AnyTransition.scale(scale: 0.96, anchor: .top)
+            .combined(with: .opacity)
+            .animation(.easeOut(duration: 0.18).delay(0.12))
     }
 
     // Collapsed: a subtle live indicator for whatever is actually running.
